@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import ThemeToggle from './components/ThemeToggle';
+import { postSupportingDocument } from '../lib/supporting-documents';
 import * as pdfjsLib from 'pdfjs-dist';
 
 // Configure worker to use local file from public directory
@@ -225,6 +226,24 @@ export default function FileUpload() {
             };
           })
         );
+
+        const supportingDocPromises = filesWithContent.map((file) =>
+          postSupportingDocument({
+            title: file.fileName,
+            content: file.content ?? '',
+            description: file.description ?? '',
+            schema: '',
+            projectInfo: {
+              title,
+              projectDescription,
+              technicalDomain,
+            },
+          }).catch((error) => {
+            console.error(`Failed to create supporting document for ${file.fileName}:`, error);
+          })
+        );
+
+        void Promise.allSettled(supportingDocPromises);
 
         // Create JSON object with all form data
         const projectData = {

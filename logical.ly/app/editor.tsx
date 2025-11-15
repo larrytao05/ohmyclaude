@@ -5,6 +5,8 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import mammoth from 'mammoth';
 import projectData from '../data/project-data.json';
 import ThemeToggle from './components/ThemeToggle';
+import { postSupportingDocument } from '../lib/supporting-documents';
+import { postMainDocument } from '../lib/main-document';
 
 const TECHNICAL_DOMAINS = [
   { value: '', label: 'Select a domain' },
@@ -59,18 +61,75 @@ type ClaimCheckResult = {
   evidence?: { snippet: string; sourceUrl: string }[];
 };
 
+type LogicalDocumentRef = {
+  id: string | number;
+  text: string;
+  doc_id: string | number;
+  doc_title: string;
+  chunk_index: number;
+  chunk_start: number;
+  chunk_text?: string;
+};
+
+type LogicalPairwiseContradiction = {
+  proposition: LogicalDocumentRef;
+  claim: LogicalDocumentRef;
+  reason: string;
+};
+
+type LogicalGraphContradiction = {
+  evidence_id: string;
+  evidence_text: string;
+  reason: string;
+};
+
+type LogicalDiscrepancyResult = {
+  proposition: LogicalDocumentRef;
+  pairwise_contradictions: LogicalPairwiseContradiction[];
+  graph_text_contradictions: LogicalGraphContradiction[];
+};
+
+type LogicalAnalysisResponse = {
+  success?: boolean;
+  analysis?: LogicalDiscrepancyResult[];
+};
+
+type HighlightVerdict = ClaimCheckResult['verdict'] | 'contradiction';
+
 type HighlightSegment =
   | { type: 'text'; text: string }
   | {
     type: 'highlight';
+    mode: 'fact-check' | 'logical';
     text: string;
-    verdict: ClaimCheckResult['verdict'];
+    verdict: HighlightVerdict;
     claimText: string;
     suggestion?: string;
     correction?: string;
     correctionSource?: string;
     evidence?: { snippet: string; sourceUrl: string }[];
+    tag?: 'contradiction';
+    logicalDetails?: LogicalDiscrepancyResult;
   };
+
+type SelectedInsightState =
+  | {
+    mode: 'fact-check';
+    text: string;
+    verdict: HighlightVerdict;
+    suggestion?: string;
+    correction?: string;
+    correctionSource?: string;
+    evidence?: { snippet: string; sourceUrl: string }[];
+  }
+  | {
+    mode: 'logical';
+    proposition: LogicalDocumentRef;
+    pairwiseContradictions: LogicalPairwiseContradiction[];
+    graphContradictions: LogicalGraphContradiction[];
+  };
+
+type AnalysisMode = 'fact-check' | 'logical';
 
 export default function Editor() {
   const typedProjectData = projectData as ProjectData;
@@ -112,14 +171,9 @@ export default function Editor() {
   const [factCheckResults, setFactCheckResults] = useState<ClaimCheckResult[]>([]);
   const [isFactCheckLoading, setIsFactCheckLoading] = useState(false);
   const [factCheckError, setFactCheckError] = useState<string | null>(null);
-  const [selectedInsight, setSelectedInsight] = useState<{
-    text: string;
-    verdict: ClaimCheckResult['verdict'];
-    suggestion?: string;
-    correction?: string;
-    correctionSource?: string;
-    evidence?: { snippet: string; sourceUrl: string }[];
-  } | null>(null);
+  const [logicalResults, setLogicalResults] = useState<LogicalDiscrepancyResult[]>([]);
+  const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('fact-check');
+  const [selectedInsight, setSelectedInsight] = useState<SelectedInsightState | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
@@ -131,6 +185,16 @@ export default function Editor() {
   const [supportUploadDescription, setSupportUploadDescription] = useState('');
   const [isSavingSupportUpload, setIsSavingSupportUpload] = useState(false);
   const [supportUploadError, setSupportUploadError] = useState<string | null>(null);
+  const [isLogicalCheckLoading, setIsLogicalCheckLoading] = useState(false);
+  const [logicalCheckError, setLogicalCheckError] = useState<string | null>(null);
+  const [logicalCheckSuccess, setLogicalCheckSuccess] = useState<string | null>(null);
+
+  const hasFactResults = factCheckResults.length > 0;
+  const hasLogicalResults = logicalResults.length > 0;
+  const hasAnyAnalysisResults = hasFactResults || hasLogicalResults;
+  const canShowAnalysisContent =
+    (analysisMode === 'fact-check' && hasFactResults) ||
+    (analysisMode === 'logical' && hasLogicalResults);
 
   const handleContentChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const text = e.target.value;
@@ -238,6 +302,10 @@ export default function Editor() {
       const results = data.results ?? [];
       setFactCheckResults(results);
       setIsAnalysisView(results.length > 0);
+      if (results.length > 0) {
+        setAnalysisMode('fact-check');
+        setSelectedInsight(null);
+      }
     } catch (error) {
       console.error('Error running fact check:', error);
       setFactCheckResults([]);
@@ -249,25 +317,90 @@ export default function Editor() {
     }
   }, [content]);
 
-  const verdictTextClass = (verdict: ClaimCheckResult['verdict']) =>
-    verdict === 'contradicted'
+  const handleCheckLogicalDiscrepancies = useCallback(async () => {
+    if (!content.trim()) {
+      setLogicalCheckError('Please enter or upload document content before running this check.');
+      setLogicalCheckSuccess(null);
+      return;
+    }
+
+    setIsLogicalCheckLoading(true);
+    setLogicalCheckError(null);
+    setLogicalCheckSuccess(null);
+
+    try {
+      const response = await postMainDocument({
+        title: uploadedFileName || projectInfo.title || 'Main Document',
+        content,
+        description: projectInfo.projectDescription ?? '',
+        schema: '',
+        projectInfo,
+      });
+
+      const responseObj = response as LogicalAnalysisResponse | LogicalDiscrepancyResult[] | null;
+      const results = Array.isArray(responseObj)
+        ? responseObj
+        : Array.isArray(responseObj?.analysis)
+          ? responseObj.analysis ?? []
+          : [];
+      const apiSuccess =
+        responseObj && !Array.isArray(responseObj) && typeof responseObj === 'object'
+          ? responseObj.success
+          : undefined;
+
+      setLogicalResults(results);
+      setSelectedInsight(null);
+
+      if (results.length > 0) {
+        setAnalysisMode('logical');
+        setIsAnalysisView(true);
+        const suffix =
+          apiSuccess === false ? ' (partial response from analyzer)' : '';
+        setLogicalCheckSuccess(
+          `Detected ${results.length} logical contradiction${results.length === 1 ? '' : 's'}${suffix}.`,
+        );
+      } else {
+        const noResultMsg =
+          apiSuccess === false
+            ? 'Analyzer returned no contradictions. Please retry in a moment.'
+            : 'No logical contradictions detected.';
+        setLogicalCheckSuccess(noResultMsg);
+        setIsAnalysisView(false);
+      }
+    } catch (error) {
+      console.error('Failed to check logical discrepancies:', error);
+      setLogicalResults([]);
+      setLogicalCheckError(
+        error instanceof Error ? error.message : 'Failed to start logical discrepancy check.',
+      );
+      setLogicalCheckSuccess(null);
+    } finally {
+      setIsLogicalCheckLoading(false);
+    }
+  }, [content, projectInfo, uploadedFileName]);
+
+  const verdictTextClass = (verdict: HighlightVerdict) =>
+    verdict === 'contradicted' || verdict === 'contradiction'
       ? 'bg-red-100/80 text-red-900 border border-red-200 dark:bg-red-900/30 dark:text-red-100 dark:border-red-800'
       : 'bg-amber-100/80 text-amber-900 border border-amber-200 dark:bg-amber-900/30 dark:text-amber-100 dark:border-amber-700';
 
-  const verdictPillClass = (verdict: ClaimCheckResult['verdict']) =>
-    verdict === 'contradicted'
+  const verdictPillClass = (verdict: HighlightVerdict) =>
+    verdict === 'contradicted' || verdict === 'contradiction'
       ? 'bg-red-100 text-red-900 border border-red-200 dark:bg-red-900/40 dark:text-red-100 dark:border-red-800'
       : 'bg-amber-100 text-amber-900 border border-amber-200 dark:bg-amber-900/40 dark:text-amber-100 dark:border-amber-700';
 
-  const verdictLabel = (verdict: ClaimCheckResult['verdict']) =>
-    verdict === 'contradicted' ? 'Contradicted' : 'Uncertain';
+  const verdictLabel = (verdict: HighlightVerdict) =>
+    verdict === 'contradiction' ? 'Contradiction' : verdict === 'contradicted' ? 'Contradicted' : 'Uncertain';
 
   const highlightSegments = useMemo<HighlightSegment[]>(() => {
     if (!content) {
       return [];
     }
 
-    if (factCheckResults.length === 0) {
+    const useFactHighlights = analysisMode === 'fact-check' && hasFactResults;
+    const useLogicalHighlights = analysisMode === 'logical' && hasLogicalResults;
+
+    if (!useFactHighlights && !useLogicalHighlights) {
       return [{ type: 'text', text: content }];
     }
 
@@ -298,39 +431,71 @@ export default function Editor() {
       return null;
     };
 
-    const spans = factCheckResults
-      .map((result) => {
-        const claim = claims.find((c) => c.id === result.id);
-        const claimText = claim?.claimText?.trim();
-        if (!claimText) return null;
-
-        const range = findAvailableRange(claimText);
-        if (!range) return null;
-
-        return {
-          id: result.id,
-          start: range.start,
-          end: range.end,
-          verdict: result.verdict,
-          claimText,
-          suggestion: result.suggestion,
-          correction: result.correction,
-          correctionSource: result.correctionSource,
-          evidence: result.evidence ?? [],
-        };
-      })
-      .filter(Boolean)
-      .sort((a, b) => (a!.start ?? 0) - (b!.start ?? 0)) as {
-        id: string;
+    type Span =
+      | {
+        mode: 'fact-check';
         start: number;
         end: number;
-        verdict: ClaimCheckResult['verdict'];
+        verdict: HighlightVerdict;
         claimText: string;
         suggestion?: string;
         correction?: string;
         correctionSource?: string;
         evidence?: { snippet: string; sourceUrl: string }[];
-      }[];
+      }
+      | {
+        mode: 'logical';
+        start: number;
+        end: number;
+        claimText: string;
+        logicalDetails: LogicalDiscrepancyResult;
+      };
+
+    const spans: Span[] = (useFactHighlights
+      ? factCheckResults
+        .map((result) => {
+          const claim = claims.find((c) => c.id === result.id);
+          const claimText = claim?.claimText?.trim();
+          if (!claimText) return null;
+
+          const range = findAvailableRange(claimText);
+          if (!range) return null;
+
+          return {
+            mode: 'fact-check' as const,
+            start: range.start,
+            end: range.end,
+            verdict: result.verdict as HighlightVerdict,
+            claimText,
+            suggestion: result.suggestion,
+            correction: result.correction,
+            correctionSource: result.correctionSource,
+            evidence: result.evidence ?? [],
+          };
+        })
+        .filter(Boolean)
+      : logicalResults
+        .map((result) => {
+          const snippet =
+            result.proposition.chunk_text?.trim() ||
+            result.proposition.text?.trim() ||
+            '';
+          if (!snippet) return null;
+
+          const range = findAvailableRange(snippet);
+          if (!range) return null;
+
+          return {
+            mode: 'logical' as const,
+            start: range.start,
+            end: range.end,
+            claimText: snippet,
+            logicalDetails: result,
+          };
+        })
+        .filter(Boolean)) as Span[];
+
+    spans.sort((a, b) => a.start - b.start);
 
     const segments: HighlightSegment[] = [];
     let cursor = 0;
@@ -343,16 +508,30 @@ export default function Editor() {
         });
       }
 
-      segments.push({
-        type: 'highlight',
-        text: content.slice(span.start, span.end),
-        verdict: span.verdict,
-        claimText: span.claimText,
-        suggestion: span.suggestion,
-        correction: span.correction,
-        correctionSource: span.correctionSource,
-        evidence: span.evidence,
-      });
+      if (span.mode === 'fact-check') {
+        segments.push({
+          type: 'highlight',
+          mode: 'fact-check',
+          text: content.slice(span.start, span.end),
+          verdict: span.verdict,
+          claimText: span.claimText,
+          suggestion: span.suggestion,
+          correction: span.correction,
+          correctionSource: span.correctionSource,
+          evidence: span.evidence,
+        });
+      } else {
+        segments.push({
+          type: 'highlight',
+          mode: 'logical',
+          text: content.slice(span.start, span.end),
+          verdict: 'contradiction',
+          claimText: span.claimText,
+          tag: 'contradiction',
+          logicalDetails: span.logicalDetails,
+        });
+      }
+
       cursor = span.end;
     });
 
@@ -364,11 +543,22 @@ export default function Editor() {
     }
 
     return segments;
-  }, [content, claims, factCheckResults]);
+  }, [analysisMode, content, claims, factCheckResults, hasFactResults, hasLogicalResults, logicalResults]);
 
   const handleHighlightSelect = useCallback(
     (segment: Extract<HighlightSegment, { type: 'highlight' }>) => {
+      if (segment.mode === 'logical' && segment.logicalDetails) {
+        setSelectedInsight({
+          mode: 'logical',
+          proposition: segment.logicalDetails.proposition,
+          pairwiseContradictions: segment.logicalDetails.pairwise_contradictions,
+          graphContradictions: segment.logicalDetails.graph_text_contradictions,
+        });
+        return;
+      }
+
       setSelectedInsight({
+        mode: 'fact-check',
         text: segment.text,
         verdict: segment.verdict,
         suggestion: segment.suggestion,
@@ -566,13 +756,26 @@ export default function Editor() {
       setIsSupportUploadModalOpen(false);
       setSupportUploadFile(null);
       setSupportUploadDescription('');
+
+      postSupportingDocument({
+        title: newDocument.document_title,
+        content: newDocument.content ?? '',
+        description: newDocument.description,
+        schema: '',
+        projectInfo,
+      }).catch((error) => {
+        console.error(
+          `Failed to create supporting document record for ${newDocument.document_title}:`,
+          error,
+        );
+      });
     } catch (error) {
       console.error('Failed to upload supporting document:', error);
       alert(error instanceof Error ? error.message : 'Failed to upload supporting document.');
     } finally {
       setIsSavingSupportUpload(false);
     }
-  }, [documents, extractTextFromDocument, supportUploadDescription, supportUploadFile]);
+  }, [documents, extractTextFromDocument, projectInfo, supportUploadDescription, supportUploadFile]);
 
   const claimMap = useMemo(() => {
     const pairs: Array<[string, ClaimSpan]> = claims
@@ -582,10 +785,10 @@ export default function Editor() {
   }, [claims]);
 
   const handleOpenAnalysisSidebar = useCallback(() => {
-    if (factCheckResults.length === 0) return;
+    if (!hasAnyAnalysisResults) return;
     setIsAnalysisSidebarMounted(true);
     requestAnimationFrame(() => setIsAnalysisSidebarOpen(true));
-  }, [factCheckResults.length]);
+  }, [hasAnyAnalysisResults]);
 
   const handleCloseAnalysisSidebar = useCallback(() => {
     setIsAnalysisSidebarOpen(false);
@@ -668,12 +871,24 @@ export default function Editor() {
   }, []);
 
   useEffect(() => {
-    if (factCheckResults.length === 0) {
+    if (!hasAnyAnalysisResults) {
       setIsAnalysisSidebarOpen(false);
       setIsAnalysisSidebarMounted(false);
       setIsAnalysisView(false);
+      setSelectedInsight(null);
+      return;
     }
-  }, [factCheckResults.length]);
+
+    if (analysisMode === 'fact-check' && !hasFactResults && hasLogicalResults) {
+      setAnalysisMode('logical');
+    } else if (analysisMode === 'logical' && !hasLogicalResults && hasFactResults) {
+      setAnalysisMode('fact-check');
+    }
+  }, [analysisMode, hasAnyAnalysisResults, hasFactResults, hasLogicalResults]);
+
+  useEffect(() => {
+    setSelectedInsight(null);
+  }, [analysisMode]);
 
   useEffect(() => {
     if (!isAnalysisSidebarOpen && isAnalysisSidebarMounted) {
@@ -846,6 +1061,36 @@ export default function Editor() {
                 </button>
 
                 <button
+                  onClick={handleCheckLogicalDiscrepancies}
+                  disabled={isLogicalCheckLoading || !content.trim()}
+                  className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition-colors hover:border-zinc-300 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:border-zinc-600 dark:hover:bg-zinc-800"
+                >
+                  {isLogicalCheckLoading ? (
+                    <>
+                      <span className="h-3 w-3 animate-spin rounded-full border-2 border-zinc-400 border-t-transparent dark:border-zinc-500" />
+                      Checking for logical discrepancies…
+                    </>
+                  ) : (
+                    <>
+                      <svg
+                        className="h-4 w-4 text-current"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M12 8c-1.657 0-3 1.343-3 3m0 0a3 3 0 006 0m-6 0H6m9 0h3m-9 0l-3 9m9-9l3 9"
+                        />
+                      </svg>
+                      Check for Logical Discrepancies
+                    </>
+                  )}
+                </button>
+
+                <button
                   onClick={handleRunFactCheck}
                   disabled={isFactCheckLoading}
                   className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition-colors hover:border-zinc-300 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:border-zinc-600 dark:hover:bg-zinc-800"
@@ -877,6 +1122,18 @@ export default function Editor() {
                 </button>
               </div>
 
+              {logicalCheckError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
+                  {logicalCheckError}
+                </div>
+              )}
+
+              {logicalCheckSuccess && (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-200">
+                  {logicalCheckSuccess}
+                </div>
+              )}
+
               {factCheckError && (
                 <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
                   {factCheckError}
@@ -892,23 +1149,71 @@ export default function Editor() {
               />
             </div>
 
-            {isAnalysisView && factCheckResults.length > 0 ? (
+            {isAnalysisView && canShowAnalysisContent ? (
               <div className="flex flex-col gap-6">
                 <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                      <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Fact-check view</p>
-                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                        Highlight colors show verdicts. Click any highlight to inspect it.
-                      </p>
-                    </div>
-                    <div className="flex flex-wrap gap-2 text-xs font-medium text-zinc-600 dark:text-zinc-300">
-                      <span className="rounded-full border border-red-200 bg-red-50/70 px-3 py-1 text-red-800 dark:border-red-800 dark:bg-red-900/30 dark:text-red-100">
-                        Contradicted
-                      </span>
-                      <span className="rounded-full border border-amber-200 bg-amber-50/70 px-3 py-1 text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-100">
-                        Uncertain
-                      </span>
+                  <div className="flex flex-col gap-4">
+                    {hasFactResults && hasLogicalResults && (
+                      <div className="flex flex-wrap items-center gap-3">
+                        <span className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
+                          View
+                        </span>
+                        <div className="inline-flex rounded-full border border-zinc-200 bg-white p-1 text-xs font-semibold dark:border-zinc-700 dark:bg-zinc-900">
+                          <button
+                            type="button"
+                            onClick={() => setAnalysisMode('fact-check')}
+                            disabled={!hasFactResults}
+                            className={`rounded-full px-3 py-1 transition ${analysisMode === 'fact-check'
+                              ? 'bg-zinc-900 text-white dark:bg-white dark:text-zinc-900'
+                              : 'text-zinc-600 hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-100'
+                              } ${!hasFactResults ? 'cursor-not-allowed opacity-40' : ''}`}
+                          >
+                            Fact Check
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setAnalysisMode('logical')}
+                            disabled={!hasLogicalResults}
+                            className={`rounded-full px-3 py-1 transition ${analysisMode === 'logical'
+                              ? 'bg-zinc-900 text-white dark:bg-white dark:text-zinc-900'
+                              : 'text-zinc-600 hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-100'
+                              } ${!hasLogicalResults ? 'cursor-not-allowed opacity-40' : ''}`}
+                          >
+                            Logical Discrepancies
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                          {analysisMode === 'logical'
+                            ? 'Logical discrepancy view'
+                            : 'Fact-check view'}
+                        </p>
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                          {analysisMode === 'logical'
+                            ? 'Red highlights mark contradictions with supporting documents.'
+                            : 'Highlight colors show verdicts. Click any highlight to inspect it.'}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2 text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                        {analysisMode === 'logical' ? (
+                          <span className="rounded-full border border-red-200 bg-red-50/70 px-3 py-1 text-red-800 dark:border-red-800 dark:bg-red-900/30 dark:text-red-100">
+                            Contradiction
+                          </span>
+                        ) : (
+                          <>
+                            <span className="rounded-full border border-red-200 bg-red-50/70 px-3 py-1 text-red-800 dark:border-red-800 dark:bg-red-900/30 dark:text-red-100">
+                              Contradicted
+                            </span>
+                            <span className="rounded-full border border-amber-200 bg-amber-50/70 px-3 py-1 text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-100">
+                              Uncertain
+                            </span>
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
 
@@ -923,9 +1228,18 @@ export default function Editor() {
                           className={`cursor-pointer rounded px-1.5 py-0.5 transition-colors hover:opacity-90 ${verdictTextClass(
                             segment.verdict,
                           )}`}
-                          title={`Click to see suggestion (${segment.verdict.toUpperCase()})`}
+                          title={
+                            segment.mode === 'logical'
+                              ? 'Click to review contradiction details'
+                              : `Click to see suggestion (${segment.verdict.toUpperCase()})`
+                          }
                         >
-                          {segment.text}
+                          <span>{segment.text}</span>
+                          {segment.tag === 'contradiction' && (
+                            <span className="ml-2 inline-flex items-center rounded-full bg-red-600 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white dark:bg-red-500">
+                              contradiction
+                            </span>
+                          )}
                         </span>
                       ),
                     )}
@@ -955,7 +1269,7 @@ export default function Editor() {
         </main>
       </div>
 
-      {factCheckResults.length > 0 && (
+      {hasAnyAnalysisResults && (
         <div className="fixed bottom-6 right-6 z-30">
           <button
             onClick={handleOpenAnalysisSidebar}
@@ -985,8 +1299,14 @@ export default function Editor() {
             <div className="flex h-full flex-col">
               <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
                 <div>
-                  <p className="text-sm font-semibold text-zinc-500 dark:text-zinc-400">Selected claim</p>
-                  <p className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">{verdictLabel(selectedInsight.verdict)}</p>
+                  <p className="text-sm font-semibold text-zinc-500 dark:text-zinc-400">
+                    {selectedInsight.mode === 'logical' ? 'Logical discrepancy' : 'Selected claim'}
+                  </p>
+                  <p className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
+                    {selectedInsight.mode === 'logical'
+                      ? 'Contradiction'
+                      : verdictLabel(selectedInsight.verdict)}
+                  </p>
                 </div>
                 <button
                   onClick={() => setSelectedInsight(null)}
@@ -1005,71 +1325,152 @@ export default function Editor() {
               </div>
 
               <div className="flex-1 space-y-6 overflow-y-auto px-6 py-6">
-                <div className="space-y-2">
-                  <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">Claim text</p>
-                  <p className="rounded-lg border border-zinc-200 bg-zinc-50 p-4 text-sm leading-relaxed text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
-                    {selectedInsight.text}
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">Verdict</p>
-                  <span
-                    className={`inline-flex w-fit rounded-full px-3 py-1 text-xs font-semibold ${verdictPillClass(
-                      selectedInsight.verdict,
-                    )}`}
-                  >
-                    {selectedInsight.verdict.toUpperCase()}
-                  </span>
-                </div>
-
-                <div className="space-y-2">
-                  <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">Suggestion</p>
-                  <p className="rounded-lg border border-amber-100 bg-amber-50/60 p-4 text-sm text-zinc-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-100">
-                    {selectedInsight.suggestion ?? 'No suggestion was provided.'}
-                  </p>
-                </div>
-
-                {selectedInsight.correction && (
-                  <div className="space-y-2">
-                    <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
-                      Correct information
-                    </p>
-                    <div className="rounded-lg border border-emerald-100 bg-emerald-50/60 p-4 text-sm text-zinc-800 dark:border-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-100">
-                      <p>{selectedInsight.correction}</p>
-                      {selectedInsight.correctionSource && (
-                        <a
-                          href={selectedInsight.correctionSource}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="mt-2 inline-block text-xs font-semibold text-blue-600 dark:text-blue-400"
-                        >
-                          View source
-                        </a>
-                      )}
+                {selectedInsight.mode === 'logical' ? (
+                  <>
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
+                        Proposition (main document)
+                      </p>
+                      <p className="rounded-lg border border-zinc-200 bg-zinc-50 p-4 text-sm leading-relaxed text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
+                        {selectedInsight.proposition.chunk_text ||
+                          selectedInsight.proposition.text ||
+                          'No text available.'}
+                      </p>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                        Source: {selectedInsight.proposition.doc_title}
+                      </p>
                     </div>
-                  </div>
-                )}
 
-                {selectedInsight.evidence && selectedInsight.evidence.length > 0 && (
-                  <div className="space-y-3">
-                    <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">Evidence</p>
-                    {selectedInsight.evidence.map((evi, idx) => (
-                      <div key={idx} className="rounded-lg border border-zinc-100 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800">
-                        <p className="text-sm text-zinc-800 dark:text-zinc-100">{evi.snippet || 'No snippet available.'}</p>
-                        {evi.sourceUrl && (
-                          <a
-                            href={evi.sourceUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="mt-2 inline-block text-xs font-semibold text-blue-600 dark:text-blue-400"
+                    {selectedInsight.pairwiseContradictions.length > 0 && (
+                      <div className="space-y-3">
+                        <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
+                          Conflicting supporting claims
+                        </p>
+                        {selectedInsight.pairwiseContradictions.map((item, idx) => (
+                          <div
+                            key={`pairwise-${item.claim.id}-${idx}`}
+                            className="rounded-lg border border-red-200 bg-red-50/70 p-4 text-sm text-zinc-900 dark:border-red-800 dark:bg-red-900/20 dark:text-red-100"
                           >
-                            {evi.sourceUrl}
-                          </a>
-                        )}
+                            <p className="text-[10px] font-semibold uppercase tracking-wide text-red-800 dark:text-red-200">
+                              Document
+                            </p>
+                            <p className="text-sm font-semibold text-red-900 dark:text-red-100">
+                              {item.claim.doc_title}
+                            </p>
+                            <p className="mt-2 text-xs font-semibold text-red-900 dark:text-red-100">
+                              Claim
+                            </p>
+                            <p className="text-sm text-red-900 dark:text-red-100">
+                              “{item.claim.text}”
+                            </p>
+                            <p className="mt-2 text-xs font-semibold uppercase text-red-800 dark:text-red-200">
+                              Reason
+                            </p>
+                            <p className="text-xs text-red-800 dark:text-red-200">{item.reason}</p>
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
+                    )}
+
+                    {selectedInsight.graphContradictions.length > 0 && (
+                      <div className="space-y-3">
+                        <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
+                          Graph-based contradictions
+                        </p>
+                        {selectedInsight.graphContradictions.map((item) => (
+                          <div
+                            key={item.evidence_id}
+                            className="rounded-lg border border-red-100 bg-red-50/60 p-4 text-sm text-zinc-900 dark:border-red-800 dark:bg-red-900/30 dark:text-red-100"
+                          >
+                            <p className="font-medium">{item.evidence_text}</p>
+                            <p className="mt-2 text-xs text-red-800 dark:text-red-200">{item.reason}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
+                        Claim text
+                      </p>
+                      <p className="rounded-lg border border-zinc-200 bg-zinc-50 p-4 text-sm leading-relaxed text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100">
+                        {selectedInsight.text}
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
+                        Verdict
+                      </p>
+                      <span
+                        className={`inline-flex w-fit rounded-full px-3 py-1 text-xs font-semibold ${verdictPillClass(
+                          selectedInsight.verdict,
+                        )}`}
+                      >
+                        {selectedInsight.verdict.toUpperCase()}
+                      </span>
+                    </div>
+
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
+                        Suggestion
+                      </p>
+                      <p className="rounded-lg border border-amber-100 bg-amber-50/60 p-4 text-sm text-zinc-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-100">
+                        {selectedInsight.suggestion ?? 'No suggestion was provided.'}
+                      </p>
+                    </div>
+
+                    {selectedInsight.correction && (
+                      <div className="space-y-2">
+                        <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
+                          Correct information
+                        </p>
+                        <div className="rounded-lg border border-emerald-100 bg-emerald-50/60 p-4 text-sm text-zinc-800 dark:border-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-100">
+                          <p>{selectedInsight.correction}</p>
+                          {selectedInsight.correctionSource && (
+                            <a
+                              href={selectedInsight.correctionSource}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="mt-2 inline-block text-xs font-semibold text-blue-600 dark:text-blue-400"
+                            >
+                              View source
+                            </a>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedInsight.evidence && selectedInsight.evidence.length > 0 && (
+                      <div className="space-y-3">
+                        <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
+                          Evidence
+                        </p>
+                        {selectedInsight.evidence.map((evi, idx) => (
+                          <div
+                            key={idx}
+                            className="rounded-lg border border-zinc-100 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800"
+                          >
+                            <p className="text-sm text-zinc-800 dark:text-zinc-100">
+                              {evi.snippet || 'No snippet available.'}
+                            </p>
+                            {evi.sourceUrl && (
+                              <a
+                                href={evi.sourceUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="mt-2 inline-block text-xs font-semibold text-blue-600 dark:text-blue-400"
+                              >
+                                {evi.sourceUrl}
+                              </a>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -1077,7 +1478,7 @@ export default function Editor() {
         </>
       )}
 
-      {isAnalysisSidebarMounted && factCheckResults.length > 0 && (
+      {isAnalysisSidebarMounted && hasAnyAnalysisResults && (
         <>
           <div
             className={`fixed inset-0 z-40 bg-black/10 transition-opacity duration-300 ${isAnalysisSidebarOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`}
@@ -1087,114 +1488,230 @@ export default function Editor() {
             className={`fixed inset-y-0 right-0 z-50 w-full max-w-md transform border-l border-zinc-200 bg-white shadow-2xl transition-transform duration-300 dark:border-zinc-800 dark:bg-zinc-900 sm:max-w-sm lg:max-w-md ${isAnalysisSidebarOpen ? 'translate-x-0' : 'translate-x-full'}`}
           >
             <div className="flex h-full flex-col">
-              <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
                 <div>
                   <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
-                    Fact-check analysis
+                    {analysisMode === 'logical' ? 'Logical discrepancies' : 'Fact-check analysis'}
                   </p>
                   <p className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
-                    {factCheckResults.length} findings
+                    {analysisMode === 'logical'
+                      ? `${logicalResults.length} flagged proposition${logicalResults.length === 1 ? '' : 's'}`
+                      : `${factCheckResults.length} findings`}
                   </p>
                 </div>
-                <button
-                  onClick={handleCloseAnalysisSidebar}
-                  className="rounded-full border border-zinc-200 p-2 text-zinc-500 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                >
-                  <svg className="h-4 w-4" viewBox="0 0 20 20" fill="none">
-                    <path
-                      d="M6 6l8 8m0-8l-8 8"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </button>
+                <div className="flex items-center gap-3">
+                  {hasFactResults && hasLogicalResults && (
+                    <div className="inline-flex rounded-full border border-zinc-200 bg-white p-1 text-xs font-semibold dark:border-zinc-700 dark:bg-zinc-900">
+                      <button
+                        type="button"
+                        onClick={() => setAnalysisMode('fact-check')}
+                        disabled={!hasFactResults}
+                        className={`rounded-full px-3 py-1 transition ${analysisMode === 'fact-check'
+                          ? 'bg-zinc-900 text-white dark:bg-white dark:text-zinc-900'
+                          : 'text-zinc-600 hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-100'
+                          } ${!hasFactResults ? 'cursor-not-allowed opacity-40' : ''}`}
+                      >
+                        Fact Check
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAnalysisMode('logical')}
+                        disabled={!hasLogicalResults}
+                        className={`rounded-full px-3 py-1 transition ${analysisMode === 'logical'
+                          ? 'bg-zinc-900 text-white dark:bg-white dark:text-zinc-900'
+                          : 'text-zinc-600 hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-100'
+                          } ${!hasLogicalResults ? 'cursor-not-allowed opacity-40' : ''}`}
+                      >
+                        Logical
+                      </button>
+                    </div>
+                  )}
+                  <button
+                    onClick={handleCloseAnalysisSidebar}
+                    className="rounded-full border border-zinc-200 p-2 text-zinc-500 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  >
+                    <svg className="h-4 w-4" viewBox="0 0 20 20" fill="none">
+                      <path
+                        d="M6 6l8 8m0-8l-8 8"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </button>
+                </div>
               </div>
 
               <div className="flex-1 space-y-4 overflow-y-auto px-6 py-6">
-                {factCheckResults.map((result, index) => {
-                  const claim =
-                    typeof result.id === 'string' ? claimMap.get(result.id) : undefined;
-                  return (
-                    <div
-                      key={`${result.id}-${index}`}
-                      className="rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800"
-                    >
-                      <div className="mb-3 flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
-                            Claim
-                          </p>
-                          <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                            {claim?.claimText ?? 'Claim unavailable'}
-                          </p>
+                {analysisMode === 'logical' ? (
+                  logicalResults.length === 0 ? (
+                    <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                      No logical contradictions detected.
+                    </p>
+                  ) : (
+                    logicalResults.map((result, index) => (
+                      <div
+                        key={`logical-${result.proposition.id}-${index}`}
+                        className="rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800"
+                      >
+                        <div className="mb-3 flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
+                              Proposition
+                            </p>
+                            <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                              {result.proposition.chunk_text ||
+                                result.proposition.text ||
+                                'Text unavailable'}
+                            </p>
+                            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                              {result.proposition.doc_title}
+                            </p>
+                          </div>
+                          <span className="rounded-full border border-red-200 bg-red-50/70 px-3 py-1 text-xs font-semibold text-red-800 dark:border-red-800 dark:bg-red-900/30 dark:text-red-100">
+                            Contradiction
+                          </span>
                         </div>
-                        <span
-                          className={`rounded-full px-3 py-1 text-xs font-semibold ${verdictPillClass(
-                            result.verdict,
-                          )}`}
-                        >
-                          {verdictLabel(result.verdict)}
-                        </span>
+
+                        {result.pairwise_contradictions.length > 0 && (
+                          <div className="space-y-2">
+                            <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
+                              Conflicting supporting claims
+                            </p>
+                            {result.pairwise_contradictions.map((item, idx) => (
+                              <div
+                                key={`${result.proposition.id}-pair-${idx}`}
+                                className="rounded-lg border border-red-100 bg-red-50/60 p-3 text-sm text-zinc-900 dark:border-red-800 dark:bg-red-900/30 dark:text-red-100"
+                              >
+                                <p className="text-[10px] font-semibold uppercase tracking-wide text-red-800 dark:text-red-200">
+                                  Document
+                                </p>
+                                <p className="font-semibold text-red-900 dark:text-red-100">
+                                  {item.claim.doc_title}
+                                </p>
+                                <p className="mt-2 text-[10px] font-semibold uppercase tracking-wide text-red-800 dark:text-red-200">
+                                  Claim
+                                </p>
+                                <p className="text-sm text-red-900 dark:text-red-100">
+                                  “{item.claim.text}”
+                                </p>
+                                <p className="mt-2 text-[10px] font-semibold uppercase tracking-wide text-red-800 dark:text-red-200">
+                                  Reason
+                                </p>
+                                <p className="text-xs text-red-900 dark:text-red-200">
+                                  {item.reason}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {result.graph_text_contradictions.length > 0 && (
+                          <div className="mt-3 space-y-2">
+                            <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
+                              Graph insights
+                            </p>
+                            {result.graph_text_contradictions.map((item) => (
+                              <div
+                                key={item.evidence_id}
+                                className="rounded-lg border border-zinc-100 bg-zinc-50 p-3 text-sm text-zinc-800 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                              >
+                                <p className="font-medium">{item.evidence_text}</p>
+                                <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-300">
+                                  {item.reason}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
-
-                      {result.suggestion && (
-                        <div className="mb-3 rounded-lg border border-amber-100 bg-amber-50/70 p-3 text-sm text-zinc-800 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-100">
-                          <p className="text-xs font-semibold uppercase text-amber-800 dark:text-amber-200">
-                            Suggestion
-                          </p>
-                          <p>{result.suggestion}</p>
+                    ))
+                  )
+                ) : (
+                  factCheckResults.map((result, index) => {
+                    const claim =
+                      typeof result.id === 'string' ? claimMap.get(result.id) : undefined;
+                    return (
+                      <div
+                        key={`${result.id}-${index}`}
+                        className="rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800"
+                      >
+                        <div className="mb-3 flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
+                              Claim
+                            </p>
+                            <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                              {claim?.claimText ?? 'Claim unavailable'}
+                            </p>
+                          </div>
+                          <span
+                            className={`rounded-full px-3 py-1 text-xs font-semibold ${verdictPillClass(
+                              result.verdict,
+                            )}`}
+                          >
+                            {verdictLabel(result.verdict)}
+                          </span>
                         </div>
-                      )}
 
-                      {result.correction && (
-                        <div className="mb-3 rounded-lg border border-emerald-100 bg-emerald-50/70 p-3 text-sm text-zinc-800 dark:border-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-100">
-                          <p className="text-xs font-semibold uppercase text-emerald-800 dark:text-emerald-200">
-                            Correction
-                          </p>
-                          <p>{result.correction}</p>
-                          {result.correctionSource && (
-                            <a
-                              href={result.correctionSource}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="mt-2 inline-block text-xs font-semibold text-blue-600 dark:text-blue-400"
-                            >
-                              View source
-                            </a>
-                          )}
-                        </div>
-                      )}
+                        {result.suggestion && (
+                          <div className="mb-3 rounded-lg border border-amber-100 bg-amber-50/70 p-3 text-sm text-zinc-800 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-100">
+                            <p className="text-xs font-semibold uppercase text-amber-800 dark:text-amber-200">
+                              Suggestion
+                            </p>
+                            <p>{result.suggestion}</p>
+                          </div>
+                        )}
 
-                      {result.evidence && result.evidence.length > 0 && (
-                        <div className="space-y-2">
-                          <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
-                            Evidence
-                          </p>
-                          {result.evidence.map((evidence, idx) => (
-                            <div
-                              key={`${result.id}-evidence-${idx}`}
-                              className="rounded-lg border border-zinc-100 bg-zinc-50 p-3 text-sm text-zinc-800 dark:border-zinc-700 dark:bg-zinc-900"
-                            >
-                              <p>{evidence.snippet || 'No snippet available.'}</p>
-                              {evidence.sourceUrl && (
-                                <a
-                                  href={evidence.sourceUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="mt-2 inline-block text-xs font-semibold text-blue-600 dark:text-blue-400"
-                                >
-                                  {evidence.sourceUrl}
-                                </a>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                        {result.correction && (
+                          <div className="mb-3 rounded-lg border border-emerald-100 bg-emerald-50/70 p-3 text-sm text-zinc-800 dark:border-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-100">
+                            <p className="text-xs font-semibold uppercase text-emerald-800 dark:text-emerald-200">
+                              Correction
+                            </p>
+                            <p>{result.correction}</p>
+                            {result.correctionSource && (
+                              <a
+                                href={result.correctionSource}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="mt-2 inline-block text-xs font-semibold text-blue-600 dark:text-blue-400"
+                              >
+                                View source
+                              </a>
+                            )}
+                          </div>
+                        )}
+
+                        {result.evidence && result.evidence.length > 0 && (
+                          <div className="space-y-2">
+                            <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
+                              Evidence
+                            </p>
+                            {result.evidence.map((evidence, idx) => (
+                              <div
+                                key={`${result.id}-evidence-${idx}`}
+                                className="rounded-lg border border-zinc-100 bg-zinc-50 p-3 text-sm text-zinc-800 dark:border-zinc-700 dark:bg-zinc-900"
+                              >
+                                <p>{evidence.snippet || 'No snippet available.'}</p>
+                                {evidence.sourceUrl && (
+                                  <a
+                                    href={evidence.sourceUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="mt-2 inline-block text-xs font-semibold text-blue-600 dark:text-blue-400"
+                                  >
+                                    {evidence.sourceUrl}
+                                  </a>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
               </div>
             </div>
           </aside>

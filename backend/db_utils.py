@@ -50,8 +50,7 @@ class DatabaseUtils:
             print(f"Extracting entities and relationships from chunk: {chunk}")
             # extract entities and relationships
             entities, relationships, claims, claim_edges = self.extract_entities(chunk, schema, project_info)
-            print(f"Entities: {entities}")
-            print(f"Relationships: {relationships}")
+
             # Optionally deduplicate entities (not used directly for provenance)
             # deduplicated_entities = self.deduplicate_entities(entities)
 
@@ -85,7 +84,6 @@ class DatabaseUtils:
                     total_chunks=len(chunks)
                 )
 
-                print(f"Claims: {claims}")
                 # deduplicate propositions within this chunk
                 deduplicated_claims = self.deduplicate_claims(claims)
                 # Ensure provenance is present on deduplicated propositions

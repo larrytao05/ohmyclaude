@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import ThemeToggle from './app/components/ThemeToggle';
+import ThemeToggle from './components/ThemeToggle';
 
 interface FileWithDescription {
   file: File;
@@ -98,10 +98,10 @@ export default function FileUpload() {
     );
   };
 
-  const isFormValid = 
-    title.trim() !== '' && 
-    projectDescription.trim() !== '' && 
-    technicalDomain !== '' && 
+  const isFormValid =
+    title.trim() !== '' &&
+    projectDescription.trim() !== '' &&
+    technicalDomain !== '' &&
     uploadedFiles.length > 0;
 
   const getMissingRequirements = () => {
@@ -117,7 +117,7 @@ export default function FileUpload() {
     if (isFormValid && !isUploading) {
       setIsUploading(true);
       setUploadProgress(0);
-      
+
       try {
         // Create JSON object with all form data
         const projectData = {
@@ -186,8 +186,8 @@ export default function FileUpload() {
         <div></div>
         <div className="flex items-center gap-4">
           <ThemeToggle />
-          <Link 
-            href="/" 
+          <Link
+            href="/"
             onClick={handleLogoClick}
             className="text-2xl font-bold text-black dark:text-white hover:opacity-80 transition-opacity"
           >
@@ -348,11 +348,10 @@ export default function FileUpload() {
 
           {/* File upload area */}
           <div
-            className={`flex-1 border-2 border-dashed rounded-xl flex items-center justify-center transition-all ${
-              isDragging
+            className={`flex-1 border-2 border-dashed rounded-xl flex items-center justify-center transition-all ${isDragging
                 ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 dark:border-blue-400 shadow-lg scale-[1.02]'
                 : 'border-gray-300 dark:border-gray-600 hover:border-blue-400 dark:hover:border-blue-500 hover:bg-gray-50 dark:hover:bg-gray-800/50 bg-white dark:bg-gray-800 shadow-sm'
-            }`}
+              }`}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
@@ -366,17 +365,15 @@ export default function FileUpload() {
                 accept=".pdf,.doc,.docx,.txt"
               />
               <div className="text-center">
-                <div className={`mx-auto h-16 w-16 mb-5 rounded-full flex items-center justify-center transition-colors ${
-                  isDragging 
-                    ? 'bg-blue-100 dark:bg-blue-900/30' 
+                <div className={`mx-auto h-16 w-16 mb-5 rounded-full flex items-center justify-center transition-colors ${isDragging
+                    ? 'bg-blue-100 dark:bg-blue-900/30'
                     : 'bg-gray-100 dark:bg-gray-700'
-                }`}>
+                  }`}>
                   <svg
-                    className={`h-8 w-8 transition-colors ${
-                      isDragging
+                    className={`h-8 w-8 transition-colors ${isDragging
                         ? 'text-blue-600 dark:text-blue-400'
                         : 'text-gray-400 dark:text-gray-500'
-                    }`}
+                      }`}
                     stroke="currentColor"
                     fill="none"
                     viewBox="0 0 48 48"
@@ -428,7 +425,7 @@ export default function FileUpload() {
           </div>
         )}
 
-        <div 
+        <div
           className="relative inline-block"
           onMouseEnter={() => !isFormValid && !isUploading && setShowTooltip(true)}
           onMouseLeave={() => setShowTooltip(false)}
@@ -448,11 +445,10 @@ export default function FileUpload() {
           <button
             onClick={handleSubmit}
             disabled={!isFormValid || isUploading}
-            className={`px-8 py-3.5 rounded-lg font-semibold text-sm transition-all shadow-lg ${
-              isFormValid && !isUploading
+            className={`px-8 py-3.5 rounded-lg font-semibold text-sm transition-all shadow-lg ${isFormValid && !isUploading
                 ? 'bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white cursor-pointer hover:shadow-xl hover:scale-105 active:scale-100'
                 : 'bg-gray-300 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed shadow-none'
-            }`}
+              }`}
           >
             {isUploading ? 'Uploading...' : 'Upload'}
           </button>

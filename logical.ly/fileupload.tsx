@@ -1,9 +1,15 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import ThemeToggle from './app/components/ThemeToggle';
+import * as pdfjsLib from 'pdfjs-dist';
+
+// Configure worker to use local file from public directory
+if (typeof window !== 'undefined') {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `${window.location.origin}/pdf.worker.min.js`;
+}
 
 interface FileWithDescription {
   file: File;
@@ -28,6 +34,13 @@ export default function FileUpload() {
     domain: false,
     files: false,
   });
+
+  // Ensure worker is configured on mount
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = `${window.location.origin}/pdf.worker.min.js`;
+    }
+  }, []);
 
   const hasUnsavedData = () => {
     return (
@@ -140,36 +153,88 @@ export default function FileUpload() {
     return missing;
   };
 
+  const extractTextFromPDF = async (file: File): Promise<string> => {
+    try {
+      console.log('Starting PDF extraction for:', file.name);
+      const arrayBuffer = await file.arrayBuffer();
+      console.log('File loaded, size:', arrayBuffer.byteLength);
+      
+      const loadingTask = pdfjsLib.getDocument({ 
+        data: arrayBuffer,
+        verbosity: 0, // Suppress warnings
+        useSystemFonts: true,
+      });
+      const pdf = await loadingTask.promise;
+      
+      console.log('PDF loaded, pages:', pdf.numPages);
+      let fullText = '';
+
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const textContent = await page.getTextContent();
+        const pageText = textContent.items
+          .map((item: any) => item.str)
+          .join(' ');
+        fullText += pageText + '\n\n';
+        console.log(`Page ${i} extracted, text length:`, pageText.length);
+      }
+
+      const result = fullText.trim();
+      console.log('Total extracted text length:', result.length);
+      return result;
+    } catch (error) {
+      console.error('Error extracting text from PDF:', error);
+      console.error('Error details:', error instanceof Error ? error.message : String(error));
+      return '';
+    }
+  };
+
+  const extractTextFromFile = async (file: File): Promise<string> => {
+    console.log('Extracting text from file:', file.name, 'Type:', file.type);
+    
+    if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+      return await extractTextFromPDF(file);
+    } else if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
+      return await file.text();
+    } else {
+      // For DOC/DOCX files, return empty string for now
+      // You can add support for these formats later using libraries like 'mammoth'
+      console.log('Unsupported file type, returning empty string');
+      return '';
+    }
+  };
+
   const handleSubmit = async () => {
     if (isFormValid && !isUploading) {
       setIsUploading(true);
       setUploadProgress(0);
       
       try {
+        // Extract text content from all files
+        setUploadProgress(10);
+        const filesWithContent = await Promise.all(
+          uploadedFiles.map(async (fileItem, index) => {
+            const content = await extractTextFromFile(fileItem.file);
+            setUploadProgress(10 + (index + 1) * (70 / uploadedFiles.length));
+            return {
+              fileName: fileItem.file.name,
+              fileType: fileItem.file.type,
+              description: fileItem.description,
+              content: content,
+              order: index + 1, // Unique sequential number (1, 2, 3, 4...)
+            };
+          })
+        );
+
         // Create JSON object with all form data
         const projectData = {
           title,
           projectDescription,
           technicalDomain,
-          uploadedFiles: uploadedFiles.map((fileItem, index) => ({
-            fileName: fileItem.file.name,
-            fileType: fileItem.file.type,
-            description: fileItem.description,
-            order: index + 1, // Unique sequential number (1, 2, 3, 4...)
-          })),
+          uploadedFiles: filesWithContent,
         };
 
-        // Simulate progress for JSON save (since fetch doesn't support progress for JSON)
-        // In a real scenario, you'd track progress if uploading actual files
-        const progressInterval = setInterval(() => {
-          setUploadProgress((prev) => {
-            if (prev >= 90) {
-              clearInterval(progressInterval);
-              return 90;
-            }
-            return prev + 10;
-          });
-        }, 100);
+        setUploadProgress(85);
 
         // Save to file on server via API route
         const response = await fetch('/api/save-project-data', {
@@ -180,8 +245,7 @@ export default function FileUpload() {
           body: JSON.stringify(projectData),
         });
 
-        clearInterval(progressInterval);
-        setUploadProgress(100);
+        setUploadProgress(95);
 
         if (!response.ok) {
           throw new Error('Failed to save project data');
@@ -189,6 +253,8 @@ export default function FileUpload() {
 
         const result = await response.json();
         console.log('Project data saved:', result);
+
+        setUploadProgress(100);
 
         // Small delay to show 100% before navigation
         setTimeout(() => {

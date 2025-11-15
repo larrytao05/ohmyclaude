@@ -1,4 +1,4 @@
-# ohmyclaude
+# Logical.ly
 
 AI-powered web app built for the CBC hackathon that connects a TypeScript frontend with a Python backend to talk to Claude and automate reasoning-heavy tasks.
 
@@ -8,7 +8,7 @@ AI-powered web app built for the CBC hackathon that connects a TypeScript fronte
 
 ## Overview
 
-> ohmyclaude helps users fact check their reasoning as they write, using Claude as the reasoning engine behind the scenes to cross-check information among different source documents.
+> Logical.ly helps users fact check their reasoning as they write, using Claude as the reasoning engine behind the scenes to cross-check information among different source documents.
 > This app was built for writers who need to make sure that their every line is free of errors such as circular reasoning, contradictions, false premises, and more.
 > We implement knowledge trees in order to merge information across multiple documents to fact-check against the uploaded main document.
 
@@ -42,7 +42,9 @@ AI-powered web app built for the CBC hackathon that connects a TypeScript fronte
 
 ## What We Learned
 
-Building ohmyclaude taught us how to combine LLM reasoning with a fully structured knowledge-graph pipeline. Key lessons include:
+We learned about how to use ClaudeAPI to process chunks of text, extracting key entities and relationships which are then stored in a graph db. We also use Claude to evaluate, at face value, the differences in claims made in supporting documents in contrast to your main deliverables.
+
+Building Logical.ly taught us how to combine LLM reasoning with a fully structured knowledge-graph pipeline. Key lessons include:
 
 Working With Multi-Document Extraction
 

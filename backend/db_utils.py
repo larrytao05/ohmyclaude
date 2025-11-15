@@ -26,7 +26,7 @@ class DatabaseUtils:
         return psycopg2.connect(**self.db_config)
 
     def create_document(self, description: str, content: str, title: str, schema: str = "Include any entity and relationship type", project_info: Dict[str, Any] = None) -> dict:
-        """Create a new document"""
+        """Create a new supporting document and populate the resource graph with claims/entities."""
         if project_info is None:
             project_info = {}
         result = None
@@ -41,19 +41,30 @@ class DatabaseUtils:
         # parse content
         # break into chunks of 2000 characters
         chunks = [content[i:i+2000] for i in range(0, len(content), 2000)]
-        # for each chunk, extract claims
+        # for each chunk, extract entities/relationships/claims
         if schema and project_info:
             print(f"Schema: {schema}")
             print(f"Project info: {project_info}")
-        for chunk in chunks:
+        for idx, chunk in enumerate(chunks):
+            chunk_start = idx * 2000
             print(f"Extracting entities and relationships from chunk: {chunk}")
             # extract entities and relationships
             entities, relationships, claims, claim_edges = self.extract_entities(chunk, schema, project_info)
             print(f"Entities: {entities}")
             print(f"Relationships: {relationships}")
-            # deduplicate entities
-            deduplicated_entities = self.deduplicate_entities(entities)
-            # add entities and relationships to database
+            # Optionally deduplicate entities (not used directly for provenance)
+            # deduplicated_entities = self.deduplicate_entities(entities)
+
+            # Attach provenance to each resource-graph claim
+            for claim in claims:
+                claim["doc_type"] = "supporting"
+                claim["doc_id"] = result
+                claim["doc_title"] = title
+                claim["chunk_index"] = idx
+                claim["chunk_start"] = chunk_start
+                claim["chunk_text"] = chunk
+
+            # Add entities, relationships, and resource-graph claims to Neo4j
             self.add_entities(entities, relationships, claims, claim_edges)
         return result
 
@@ -62,7 +73,8 @@ class DatabaseUtils:
         chunks = [content[i:i+2000] for i in range(0, len(content), 2000)]
         if schema and project_info:
             for idx, chunk in enumerate(chunks):
-            # extract claims and relationships between them
+                chunk_start = idx * 2000
+                # extract claims and relationships between them
                 print("Reached")
                 claims, claim_edges = self.extract_claims(
                     chunk=chunk,
@@ -74,9 +86,17 @@ class DatabaseUtils:
                 )
 
                 print(f"Claims: {claims}")
-            # deduplicate claims
+                # deduplicate propositions within this chunk
                 deduplicated_claims = self.deduplicate_claims(claims)
-            # add entities and relationships to database
+                # Ensure provenance is present on deduplicated propositions
+                for claim in deduplicated_claims:
+                    claim["doc_type"] = "main"
+                    claim["doc_id"] = doc_id or title
+                    claim["doc_title"] = title
+                    claim["chunk_index"] = idx
+                    claim["chunk_start"] = chunk_start
+                    claim["chunk_text"] = chunk
+                # add propositions and their relationships to the graph
                 self.add_claims(deduplicated_claims, claim_edges, graph, type="Proposition")
 
     def extract_entities(self, chunk: str, schema: str, project_info: dict) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict]]:
@@ -785,7 +805,7 @@ Return ONLY the JSON object, no other text or explanation.
         
         return None
 
-    def get_top_resource_claim_matches(self, main_claim: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def get_top_resource_claim_matches(self, main_proposition: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Given a main-document claim, retrieve the most relevant resource claims
         from the graph using a simple overlap-based scoring heuristic.
@@ -798,14 +818,14 @@ Return ONLY the JSON object, no other text or explanation.
         """
         import json
 
-        # Extract canonical features from the main-document claim
-        main_relation_id = main_claim.get("relation_id")
+        # Extract canonical features from the main-document proposition
+        main_relation_id = main_proposition.get("relation_id")
         main_entities = {
             entity.get("label")
-            for entity in main_claim.get("entities", [])
+            for entity in main_proposition.get("entities", [])
             if isinstance(entity, dict) and entity.get("label")
         }
-        main_text = main_claim.get("text")
+        main_text = main_proposition.get("text")
 
         # Fetch all Claim nodes from the graph (treated as resource claims for now)
         claim_nodes = self.graph.get_all_nodes(label="Claim")
@@ -1169,10 +1189,28 @@ Return ONLY the JSON object, no other text or explanation.
                 text = json_match.group(0)
 
             result = json.loads(text)
-            contradictions = result.get("contradictions", [])
-            if isinstance(contradictions, list):
-                return {"contradictions": contradictions}
-            return {"contradictions": []}
+            raw_contradictions = result.get("contradictions", [])
+            if not isinstance(raw_contradictions, list):
+                return {"contradictions": []}
+
+            # Join back to evidence text for provenance
+            evidence_by_id = {e["id"]: e for e in evidence_items}
+            enriched = []
+            for item in raw_contradictions:
+                eid = item.get("evidence_id")
+                if not eid:
+                    continue
+                ev = evidence_by_id.get(eid)
+                if not ev:
+                    continue
+                enriched.append(
+                    {
+                        "evidence_id": eid,
+                        "evidence_text": ev.get("text", ""),
+                        "reason": item.get("reason", ""),
+                    }
+                )
+            return {"contradictions": enriched}
         except json.JSONDecodeError as e:
             print(f"JSON parsing error in assess_claim_with_graph_text: {e}")
             print(f"Response text: {response.content[0].text[:500]}...")
@@ -1184,15 +1222,17 @@ Return ONLY the JSON object, no other text or explanation.
 
     def analyze_main_document_contradictions(self) -> List[Dict[str, Any]]:
         """
-        Analyze all main-document claims in the graph for potential contradictions.
+        Analyze all main-document propositions in the graph for potential contradictions.
 
-        For each Claim node in the graph:
-          1) Find top-k overlapping resource claims using get_top_resource_claim_matches.
-          2) Ask the LLM which of those resource claims clearly contradict the claim.
-          3) If no contradictions are found, fall back to assessing the claim against
-             the full text export of the graph.
+        For each Proposition node in the graph:
+          1) Find top-k overlapping resource claims (Claim nodes).
+          2) Ask the LLM which of those claims clearly contradict the proposition.
+          3) If no contradictions are found, fall back to assessing the proposition
+             against the full text export of the resource graph.
 
-        Returns a list of per-claim analysis results.
+        Returns a list of per-proposition analysis results, including provenance
+        (document and chunk information) for both the proposition and the
+        contradicting resource claims/evidence.
         """
         import json
 
@@ -1203,32 +1243,42 @@ Return ONLY the JSON object, no other text or explanation.
 
         results: List[Dict[str, Any]] = []
 
-        for node in claim_nodes:
-            properties = node.get("properties", {})
+        # Main-document statements are stored as nodes with label "Proposition"
+        proposition_nodes = self.graph.get_all_nodes(label="Proposition")
 
-            # Reconstruct a main-claim structure compatible with our LLM prompts
-            main_claim = {
-                "id": str(properties.get("id", node.get("id"))),
-                "text": properties.get("text", ""),
-                "relation_id": properties.get("relation_id"),
+        for node in proposition_nodes:
+            props = node.get("properties", {})
+
+            # Reconstruct a proposition structure compatible with our LLM prompts
+            main_proposition: Dict[str, Any] = {
+                "id": str(node.get("id")),
+                "text": props.get("text", ""),
+                "relation_id": props.get("relation_id"),
                 "entities": [],
-                "qualifiers": properties.get("qualifiers"),
+                "qualifiers": props.get("qualifiers"),
+                "doc_type": props.get("doc_type"),
+                "doc_id": props.get("doc_id"),
+                "doc_title": props.get("doc_title"),
+                "chunk_index": props.get("chunk_index"),
+                "chunk_start": props.get("chunk_start"),
+                "chunk_text": props.get("chunk_text"),
+                "node_id": node.get("id"),
             }
 
-            # Decode entities if present on the main claim
-            raw_entities = properties.get("entities")
+            # Decode entities if present on the proposition
+            raw_entities = props.get("entities")
             if isinstance(raw_entities, str):
                 try:
                     decoded = json.loads(raw_entities)
                     if isinstance(decoded, list):
-                        main_claim["entities"] = decoded
+                        main_proposition["entities"] = decoded
                 except Exception:
-                    main_claim["entities"] = []
+                    main_proposition["entities"] = []
             elif isinstance(raw_entities, list):
-                main_claim["entities"] = raw_entities
+                main_proposition["entities"] = raw_entities
 
-            # 1) Top-k resource claim matches
-            top_matches = self.get_top_resource_claim_matches(main_claim)
+            # 1) Top-k resource claim matches (Claim nodes)
+            top_matches = self.get_top_resource_claim_matches(main_proposition)
 
             print("Got top K matches")
 
@@ -1238,7 +1288,7 @@ Return ONLY the JSON object, no other text or explanation.
                 claim_props = candidate.get("claim", {})
 
                 # Decode entities on the candidate claim
-                candidate_entities = []
+                candidate_entities: List[Dict[str, Any]] = []
                 c_raw_entities = claim_props.get("entities")
                 if isinstance(c_raw_entities, str):
                     try:
@@ -1252,39 +1302,128 @@ Return ONLY the JSON object, no other text or explanation.
 
                 resource_claims_for_llm.append(
                     {
-                        "id": str(claim_props.get("id", candidate.get("node_id"))),
+                        "id": str(candidate.get("node_id")),
                         "text": claim_props.get("text", ""),
                         "relation_id": claim_props.get("relation_id"),
                         "entities": candidate_entities,
                         "qualifiers": claim_props.get("qualifiers"),
-                        "provenance": claim_props.get("provenance"),
+                        "doc_type": claim_props.get("doc_type"),
+                        "doc_id": claim_props.get("doc_id"),
+                        "doc_title": claim_props.get("doc_title"),
+                        "chunk_index": claim_props.get("chunk_index"),
+                        "chunk_start": claim_props.get("chunk_start"),
+                        "chunk_text": claim_props.get("chunk_text"),
                     }
                 )
 
-            claim_contradictions: List[Dict[str, Any]] = []
+            # 2) Direct claim-vs-proposition contradictions
+            pairwise_contradictions: List[Dict[str, Any]] = []
             if resource_claims_for_llm:
-                claim_contradictions = self.get_contradicting_resource_claims(
-                    main_claim=main_claim,
+                raw_contradictions = self.get_contradicting_resource_claims(
+                    main_claim=main_proposition,
                     resource_claims=resource_claims_for_llm,
                 )
+                # Join LLM outputs back to full resource-claim objects for clarity
+                claims_by_id = {c["id"]: c for c in resource_claims_for_llm}
+                for item in raw_contradictions:
+                    rc_id = str(item.get("resource_claim_id", ""))
+                    if not rc_id:
+                        continue
+                    rc = claims_by_id.get(rc_id)
+                    if not rc:
+                        continue
+                    pairwise_contradictions.append(
+                        {
+                            "proposition": {
+                                "id": main_proposition["id"],
+                                "text": main_proposition["text"],
+                                "doc_id": main_proposition.get("doc_id"),
+                                "doc_title": main_proposition.get("doc_title"),
+                                "chunk_index": main_proposition.get("chunk_index"),
+                                "chunk_start": main_proposition.get("chunk_start"),
+                                "chunk_text": main_proposition.get("chunk_text"),
+                            },
+                            "claim": {
+                                "id": rc["id"],
+                                "text": rc.get("text", ""),
+                                "doc_id": rc.get("doc_id"),
+                                "doc_title": rc.get("doc_title"),
+                                "chunk_index": rc.get("chunk_index"),
+                                "chunk_start": rc.get("chunk_start"),
+                                "chunk_text": rc.get("chunk_text"),
+                            },
+                            "reason": item.get("reason", ""),
+                        }
+                    )
 
-            # 2) Fallback to graph-text assessment if no direct claim contradictions
+            # 3) Fallback to graph-text assessment if no direct claim contradictions
             graph_text_contradictions: List[Dict[str, Any]] = []
-            if not claim_contradictions:
-                graph_text_result = self.assess_claim_with_graph_text(main_claim)
+            if not pairwise_contradictions:
+                graph_text_result = self.assess_claim_with_graph_text(main_proposition)
                 graph_text_contradictions = graph_text_result.get("contradictions", [])
 
             results.append(
                 {
-                    "main_claim_id": main_claim["id"],
-                    "main_claim_text": main_claim["text"],
-                    "top_resource_claims": resource_claims_for_llm,
-                    "claim_contradictions": claim_contradictions,
+                    "proposition": {
+                        "id": main_proposition["id"],
+                        "text": main_proposition["text"],
+                        "doc_id": main_proposition.get("doc_id"),
+                        "doc_title": main_proposition.get("doc_title"),
+                        "chunk_index": main_proposition.get("chunk_index"),
+                        "chunk_start": main_proposition.get("chunk_start"),
+                        "chunk_text": main_proposition.get("chunk_text"),
+                    },
+                    "pairwise_contradictions": pairwise_contradictions,
                     "graph_text_contradictions": graph_text_contradictions,
                 }
             )
 
         return results
+
+        # Example wireframe of the JSON output:
+        # [
+        #   {
+        #     "proposition": {
+        #       "id": "123",
+        #       "text": "Our model achieves 90% accuracy on DatasetX.",
+        #       "doc_id": "main_doc_1",
+        #       "doc_title": "Main Paper Title",
+        #       "chunk_index": 0,
+        #       "chunk_start": 0,
+        #       "chunk_text": "Full text of the first chunk of the main document..."
+        #     },
+        #     "pairwise_contradictions": [
+        #       {
+        #         "proposition": {
+        #           "id": "123",
+        #           "text": "Our model achieves 90% accuracy on DatasetX.",
+        #           "doc_id": "main_doc_1",
+        #           "doc_title": "Main Paper Title",
+        #           "chunk_index": 0,
+        #           "chunk_start": 0,
+        #           "chunk_text": "Full text of the first chunk of the main document..."
+        #         },
+        #         "claim": {
+        #           "id": "456",
+        #           "text": "The same model achieves 75% accuracy on DatasetX.",
+        #           "doc_id": 42,
+        #           "doc_title": "Supporting Study A",
+        #           "chunk_index": 1,
+        #           "chunk_start": 2000,
+        #           "chunk_text": "Full text of the second chunk of the supporting document..."
+        #         },
+        #         "reason": "The supporting claim reports 75% accuracy where the proposition reports 90% on the same dataset and setup."
+        #       }
+        #     ],
+        #     "graph_text_contradictions": [
+        #       {
+        #         "evidence_id": "evidence_3",
+        #         "evidence_text": "FACT 17: ModelA -[EVALUATED_ON]-> DatasetX [metric=accuracy, value=0.75]",
+        #         "reason": "This fact indicates 75% accuracy on DatasetX, contradicting the proposition's 90% figure."
+        #       }
+        #     ]
+        #   }
+        # ]
 
     def _flatten_properties_for_neo4j(self, properties: Dict[str, Any]) -> Dict[str, Any]:
         """Flatten nested objects/arrays to JSON strings for Neo4j compatibility"""
@@ -1340,10 +1479,10 @@ Return ONLY the JSON object, no other text or explanation.
                     
                     try:
                         graph.create_relationship(
-                            from_label='Claim',
+                            from_label=type,
                             from_property='text',
                             from_value=source_value,
-                            to_label='Claim',
+                            to_label=type,
                             to_property='text',
                             to_value=target_value,
                             relationship_type=relation_type,

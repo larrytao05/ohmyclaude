@@ -1,9 +1,15 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import ThemeToggle from './app/components/ThemeToggle';
+import ThemeToggle from './components/ThemeToggle';
+import * as pdfjsLib from 'pdfjs-dist';
+
+// Configure worker to use local file from public directory
+if (typeof window !== 'undefined') {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `${window.location.origin}/pdf.worker.min.js`;
+}
 
 interface FileWithDescription {
   file: File;
@@ -28,6 +34,13 @@ export default function FileUpload() {
     domain: false,
     files: false,
   });
+
+  // Ensure worker is configured on mount
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = `${window.location.origin}/pdf.worker.min.js`;
+    }
+  }, []);
 
   const hasUnsavedData = () => {
     return (
@@ -125,10 +138,10 @@ export default function FileUpload() {
     });
   };
 
-  const isFormValid = 
-    title.trim() !== '' && 
-    projectDescription.trim() !== '' && 
-    technicalDomain !== '' && 
+  const isFormValid =
+    title.trim() !== '' &&
+    projectDescription.trim() !== '' &&
+    technicalDomain !== '' &&
     uploadedFiles.length > 0;
 
   const getMissingRequirements = () => {
@@ -140,36 +153,88 @@ export default function FileUpload() {
     return missing;
   };
 
+  const extractTextFromPDF = async (file: File): Promise<string> => {
+    try {
+      console.log('Starting PDF extraction for:', file.name);
+      const arrayBuffer = await file.arrayBuffer();
+      console.log('File loaded, size:', arrayBuffer.byteLength);
+
+      const loadingTask = pdfjsLib.getDocument({
+        data: arrayBuffer,
+        verbosity: 0, // Suppress warnings
+        useSystemFonts: true,
+      });
+      const pdf = await loadingTask.promise;
+
+      console.log('PDF loaded, pages:', pdf.numPages);
+      let fullText = '';
+
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const textContent = await page.getTextContent();
+        const pageText = textContent.items
+          .map((item: any) => item.str)
+          .join(' ');
+        fullText += pageText + '\n\n';
+        console.log(`Page ${i} extracted, text length:`, pageText.length);
+      }
+
+      const result = fullText.trim();
+      console.log('Total extracted text length:', result.length);
+      return result;
+    } catch (error) {
+      console.error('Error extracting text from PDF:', error);
+      console.error('Error details:', error instanceof Error ? error.message : String(error));
+      return '';
+    }
+  };
+
+  const extractTextFromFile = async (file: File): Promise<string> => {
+    console.log('Extracting text from file:', file.name, 'Type:', file.type);
+
+    if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+      return await extractTextFromPDF(file);
+    } else if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
+      return await file.text();
+    } else {
+      // For DOC/DOCX files, return empty string for now
+      // You can add support for these formats later using libraries like 'mammoth'
+      console.log('Unsupported file type, returning empty string');
+      return '';
+    }
+  };
+
   const handleSubmit = async () => {
     if (isFormValid && !isUploading) {
       setIsUploading(true);
       setUploadProgress(0);
-      
+
       try {
+        // Extract text content from all files
+        setUploadProgress(10);
+        const filesWithContent = await Promise.all(
+          uploadedFiles.map(async (fileItem, index) => {
+            const content = await extractTextFromFile(fileItem.file);
+            setUploadProgress(10 + (index + 1) * (70 / uploadedFiles.length));
+            return {
+              fileName: fileItem.file.name,
+              fileType: fileItem.file.type,
+              description: fileItem.description,
+              content: content,
+              order: index + 1, // Unique sequential number (1, 2, 3, 4...)
+            };
+          })
+        );
+
         // Create JSON object with all form data
         const projectData = {
           title,
           projectDescription,
           technicalDomain,
-          uploadedFiles: uploadedFiles.map((fileItem, index) => ({
-            fileName: fileItem.file.name,
-            fileType: fileItem.file.type,
-            description: fileItem.description,
-            order: index + 1, // Unique sequential number (1, 2, 3, 4...)
-          })),
+          uploadedFiles: filesWithContent,
         };
 
-        // Simulate progress for JSON save (since fetch doesn't support progress for JSON)
-        // In a real scenario, you'd track progress if uploading actual files
-        const progressInterval = setInterval(() => {
-          setUploadProgress((prev) => {
-            if (prev >= 90) {
-              clearInterval(progressInterval);
-              return 90;
-            }
-            return prev + 10;
-          });
-        }, 100);
+        setUploadProgress(85);
 
         // Save to file on server via API route
         const response = await fetch('/api/save-project-data', {
@@ -180,8 +245,7 @@ export default function FileUpload() {
           body: JSON.stringify(projectData),
         });
 
-        clearInterval(progressInterval);
-        setUploadProgress(100);
+        setUploadProgress(95);
 
         if (!response.ok) {
           throw new Error('Failed to save project data');
@@ -189,6 +253,8 @@ export default function FileUpload() {
 
         const result = await response.json();
         console.log('Project data saved:', result);
+
+        setUploadProgress(100);
 
         // Small delay to show 100% before navigation
         setTimeout(() => {
@@ -208,19 +274,20 @@ export default function FileUpload() {
 
   return (
     <div className="h-screen overflow-hidden bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-900 dark:to-black flex flex-col">
-      {/* Logo and theme toggle */}
-      <nav className="w-full px-8 py-6 flex justify-between items-center border-b border-gray-200 dark:border-gray-800 flex-shrink-0">
-        <Link 
-          href="/" 
-          onClick={handleLogoClick}
-          className="text-2xl font-bold text-black dark:text-white hover:opacity-80 transition-opacity"
-        >
-          logical.ly
-        </Link>
+      {/* Logo and theme toggle in top right */}
+      <header className="flex justify-between items-center p-6 flex-shrink-0">
+        <div></div>
         <div className="flex items-center gap-4">
           <ThemeToggle />
+          <Link
+            href="/"
+            onClick={handleLogoClick}
+            className="text-2xl font-bold text-black dark:text-white hover:opacity-80 transition-opacity"
+          >
+            logical.ly
+          </Link>
         </div>
-      </nav>
+      </header>
 
       {/* Exit Confirmation Modal */}
       {showExitConfirm && (
@@ -280,11 +347,10 @@ export default function FileUpload() {
                 onChange={(e) => setTitle(e.target.value)}
                 onBlur={() => setTouchedFields({ ...touchedFields, title: true })}
                 placeholder="Enter project title"
-                className={`w-full px-4 py-3 text-base border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 transition-all shadow-sm hover:border-gray-400 dark:hover:border-gray-500 ${
-                  title.trim() === '' && touchedFields.title
-                    ? 'border-red-400 dark:border-red-600'
-                    : 'border-gray-300 dark:border-gray-600'
-                }`}
+                className={`w-full px-4 py-3 text-base border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 transition-all shadow-sm hover:border-gray-400 dark:hover:border-gray-500 ${title.trim() === '' && touchedFields.title
+                  ? 'border-red-400 dark:border-red-600'
+                  : 'border-gray-300 dark:border-gray-600'
+                  }`}
               />
               {title.trim() === '' && touchedFields.title && (
                 <p className="mt-1.5 text-sm text-red-600 dark:text-red-400">Title is required</p>
@@ -302,11 +368,10 @@ export default function FileUpload() {
                 onBlur={() => setTouchedFields({ ...touchedFields, description: true })}
                 placeholder="Enter project description"
                 rows={4}
-                className={`w-full px-4 py-3 text-base border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 resize-none transition-all shadow-sm hover:border-gray-400 dark:hover:border-gray-500 ${
-                  projectDescription.trim() === '' && touchedFields.description
-                    ? 'border-red-400 dark:border-red-600'
-                    : 'border-gray-300 dark:border-gray-600'
-                }`}
+                className={`w-full px-4 py-3 text-base border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 resize-none transition-all shadow-sm hover:border-gray-400 dark:hover:border-gray-500 ${projectDescription.trim() === '' && touchedFields.description
+                  ? 'border-red-400 dark:border-red-600'
+                  : 'border-gray-300 dark:border-gray-600'
+                  }`}
               />
               {projectDescription.trim() === '' && touchedFields.description && (
                 <p className="mt-1.5 text-sm text-red-600 dark:text-red-400">Project description is required</p>
@@ -323,11 +388,10 @@ export default function FileUpload() {
                   value={technicalDomain}
                   onChange={(e) => setTechnicalDomain(e.target.value)}
                   onBlur={() => setTouchedFields({ ...touchedFields, domain: true })}
-                  className={`w-full px-4 py-3 pr-10 text-base border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 appearance-none cursor-pointer transition-all shadow-sm hover:border-gray-400 dark:hover:border-gray-500 ${
-                    technicalDomain === '' && touchedFields.domain
-                      ? 'border-red-400 dark:border-red-600'
-                      : 'border-gray-300 dark:border-gray-600'
-                  }`}
+                  className={`w-full px-4 py-3 pr-10 text-base border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 appearance-none cursor-pointer transition-all shadow-sm hover:border-gray-400 dark:hover:border-gray-500 ${technicalDomain === '' && touchedFields.domain
+                    ? 'border-red-400 dark:border-red-600'
+                    : 'border-gray-300 dark:border-gray-600'
+                    }`}
                 >
                   <option value="">Select a domain</option>
                   <option value="software-engineering">Software Engineering</option>
@@ -423,13 +487,10 @@ export default function FileUpload() {
 
           {/* File upload area */}
           <div
-            className={`flex-1 border-2 border-dashed rounded-xl flex items-center justify-center transition-all ${
-              isDragging
-                ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 dark:border-blue-400 shadow-lg scale-[1.02]'
-                : uploadedFiles.length === 0 && touchedFields.files
-                ? 'border-red-300 dark:border-red-600/50 hover:border-red-400 dark:hover:border-red-600 hover:bg-red-50/30 dark:hover:bg-red-900/10 bg-white dark:bg-gray-800 shadow-sm'
-                : 'border-gray-300 dark:border-gray-600 hover:border-blue-400 dark:hover:border-blue-500 hover:bg-gray-50 dark:hover:bg-gray-800/50 bg-white dark:bg-gray-800 shadow-sm'
-            }`}
+            className={`flex-1 border-2 border-dashed rounded-xl flex items-center justify-center transition-all ${isDragging
+              ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 dark:border-blue-400 shadow-lg scale-[1.02]'
+              : 'border-gray-300 dark:border-gray-600 hover:border-blue-400 dark:hover:border-blue-500 hover:bg-gray-50 dark:hover:bg-gray-800/50 bg-white dark:bg-gray-800 shadow-sm'
+              }`}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={(e) => {
@@ -451,17 +512,15 @@ export default function FileUpload() {
                 accept=".pdf,.doc,.docx,.txt"
               />
               <div className="text-center">
-                <div className={`mx-auto h-16 w-16 mb-5 rounded-full flex items-center justify-center transition-colors ${
-                  isDragging 
-                    ? 'bg-blue-100 dark:bg-blue-900/30' 
-                    : 'bg-gray-100 dark:bg-gray-700'
-                }`}>
+                <div className={`mx-auto h-16 w-16 mb-5 rounded-full flex items-center justify-center transition-colors ${isDragging
+                  ? 'bg-blue-100 dark:bg-blue-900/30'
+                  : 'bg-gray-100 dark:bg-gray-700'
+                  }`}>
                   <svg
-                    className={`h-8 w-8 transition-colors ${
-                      isDragging
-                        ? 'text-blue-600 dark:text-blue-400'
-                        : 'text-gray-400 dark:text-gray-500'
-                    }`}
+                    className={`h-8 w-8 transition-colors ${isDragging
+                      ? 'text-blue-600 dark:text-blue-400'
+                      : 'text-gray-400 dark:text-gray-500'
+                      }`}
                     stroke="currentColor"
                     fill="none"
                     viewBox="0 0 48 48"
@@ -513,7 +572,7 @@ export default function FileUpload() {
           </div>
         )}
 
-        <div 
+        <div
           className="relative inline-block"
           onMouseEnter={() => !isFormValid && !isUploading && setShowTooltip(true)}
           onMouseLeave={() => setShowTooltip(false)}
@@ -533,11 +592,10 @@ export default function FileUpload() {
           <button
             onClick={handleSubmit}
             disabled={!isFormValid || isUploading}
-            className={`px-8 py-3.5 rounded-lg font-semibold text-sm transition-all shadow-lg ${
-              isFormValid && !isUploading
-                ? 'bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white cursor-pointer hover:shadow-xl hover:scale-105 active:scale-100'
-                : 'bg-gray-300 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed shadow-none'
-            }`}
+            className={`px-8 py-3.5 rounded-lg font-semibold text-sm transition-all shadow-lg ${isFormValid && !isUploading
+              ? 'bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white cursor-pointer hover:shadow-xl hover:scale-105 active:scale-100'
+              : 'bg-gray-300 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed shadow-none'
+              }`}
           >
             {isUploading ? 'Uploading...' : 'Upload'}
           </button>

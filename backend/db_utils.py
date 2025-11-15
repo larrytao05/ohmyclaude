@@ -1234,6 +1234,13 @@ Return ONLY the JSON object, no other text or explanation.
         (document and chunk information) for both the proposition and the
         contradicting resource claims/evidence.
         """
+        import json
+
+        # For now, treat all Claim nodes as main claims and use
+        # other Claim nodes as resource claims.
+        claim_nodes = self.graph.get_all_nodes(label="Proposition")
+        print(f"Got all claim nodes: {len(claim_nodes)}")
+
         results: List[Dict[str, Any]] = []
 
         # Main-document statements are stored as nodes with label "Proposition"
@@ -1272,6 +1279,8 @@ Return ONLY the JSON object, no other text or explanation.
 
             # 1) Top-k resource claim matches (Claim nodes)
             top_matches = self.get_top_resource_claim_matches(main_proposition)
+
+            print("Got top K matches")
 
             # Prepare resource claims in the expected shape for the LLM
             resource_claims_for_llm: List[Dict[str, Any]] = []

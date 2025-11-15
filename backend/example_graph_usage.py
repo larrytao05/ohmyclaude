@@ -193,7 +193,7 @@ def example_create_graph():
     db_utils.create_document("", example_supporting_doc, "HER2 positive breast cancer", schema=example_schema, project_info="Medical knowledge")
     print("Reached 2")
     
-    #db_utils.create_main_document("HER2 positive breast cancer", "HER2 positive breast cancer", example_claim, graph, schema=example_schema, project_info="Medical knowledge")
+    db_utils.create_main_document("HER2 positive breast cancer", "HER2 positive breast cancer", example_claim, graph, schema=example_schema, project_info="Medical knowledge")
     print("Reached 3")
     
     # Analyze main-document claims for contradictions against the resource graph

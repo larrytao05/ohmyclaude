@@ -77,7 +77,7 @@ class DatabaseUtils:
             # deduplicate claims
                 deduplicated_claims = self.deduplicate_claims(claims)
             # add entities and relationships to database
-                self.add_claims(deduplicated_claims, claim_edges, graph)
+                self.add_claims(deduplicated_claims, claim_edges, graph, type="Proposition")
 
     def extract_entities(self, chunk: str, schema: str, project_info: dict) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict]]:
         """Extract entities, relationships, claims, and claim_edges from a chunk of content"""
@@ -726,7 +726,7 @@ Return ONLY the JSON object, no other text or explanation.
         
         # Add claims if provided
         if claims and claim_edges:
-            self.add_claims(claims, claim_edges, self.graph)
+            self.add_claims(claims, claim_edges, self.graph, type="Claim")
         
         # Now create relationships using the entity mapping
         for relationship in relationships:
@@ -1298,7 +1298,7 @@ Return ONLY the JSON object, no other text or explanation.
                 flattened[key] = value
         return flattened
     
-    def add_claims(self, claims: list, claim_edges: list, graph: Neo4jGraph) -> None:
+    def add_claims(self, claims: list, claim_edges: list, graph: Neo4jGraph, type: str) -> None:
         # Create a mapping from claim local IDs to claim data
         claim_map = {}
         
@@ -1307,7 +1307,7 @@ Return ONLY the JSON object, no other text or explanation.
             # Flatten nested objects (like qualifiers, entities) to JSON strings
             flattened_claim = self._flatten_properties_for_neo4j(claim)
             # Create the node in Neo4j
-            node = graph.create_node(label="Claim", properties=flattened_claim)
+            node = graph.create_node(label=type, properties=flattened_claim)
             # Store mapping from local ID to claim data (for relationship creation)
             if 'id' in claim:
                 claim_map[claim['id']] = {

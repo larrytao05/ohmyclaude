@@ -3,6 +3,7 @@ import os
 import anthropic
 from graph_utils import Neo4jGraph
 from typing import Dict, Any, List, Tuple, Optional
+import json
 
 
 class DatabaseUtils:
@@ -16,7 +17,7 @@ class DatabaseUtils:
             'database': os.getenv('DB_NAME', 'ohmyclaude_db')
         }
         self.graph = graph
-    
+
     def _get_connection(self):
         """Get a database connection"""
         return psycopg2.connect(**self.db_config)
@@ -44,13 +45,13 @@ class DatabaseUtils:
         for chunk in chunks:
             print(f"Extracting entities and relationships from chunk: {chunk}")
             # extract entities and relationships
-            entities, relationships = self.extract_entities(chunk, schema, project_info)
+            entities, relationships, claims, claim_edges = self.extract_entities(chunk, schema, project_info)
             print(f"Entities: {entities}")
             print(f"Relationships: {relationships}")
             # deduplicate entities
-            # deduplicated_entities = self.deduplicate_entities(entities, project_info)
+            deduplicated_entities = self.deduplicate_entities(entities)
             # add entities and relationships to database
-            self.add_entities(entities, relationships)
+            self.add_entities(entities, relationships, claims, claim_edges)
         return result
 
     def create_main_document(self, title: str, desc: str, content: str, graph: Neo4jGraph, schema: str = "Return all claims and relationships", project_info: Dict[str, Any] = None, doc_id: str = None) -> None:
@@ -58,7 +59,7 @@ class DatabaseUtils:
         chunks = [content[i:i+2000] for i in range(0, len(content), 2000)]
         if schema and project_info:
             for idx, chunk in enumerate(chunks):
-                # extract claims and relationships between them
+            # extract claims and relationships between them
                 print("Reached")
                 claims, claim_edges = self.extract_claims(
                     chunk=chunk,
@@ -70,15 +71,15 @@ class DatabaseUtils:
                 )
 
                 print(f"Claims: {claims}")
-                # deduplicate claims
-                #deduplicated_claims = self.deduplicate_claims(claims, project_info)
-                # add entities and relationships to database
-                self.add_claims(claims, claim_edges, graph)
+            # deduplicate claims
+                deduplicated_claims = self.deduplicate_claims(claims)
+            # add entities and relationships to database
+                self.add_claims(deduplicated_claims, claim_edges, graph)
 
-    def extract_entities(self, chunk: str, schema: str, project_info: dict) -> Tuple[List[Dict], List[Dict]]:
-        """Extract entities and relationships from a chunk of content"""
+    def extract_entities(self, chunk: str, schema: str, project_info: dict) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict]]:
+        """Extract entities, relationships, claims, and claim_edges from a chunk of content"""
         client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
-        response = client.messages.create(
+        response = client.beta.messages.create(
             model="claude-sonnet-4-5-20250929",
             max_tokens=4096,
             messages=[
@@ -86,7 +87,7 @@ class DatabaseUtils:
                     "role": "user", "content": f"""<task>
                     <goal>
                         Using the provided document-local schema, extract all entity mentions
-                        and relationship instances present in this text chunk. 
+                        and relationship instances present in this text chunk. Then, generate claims that are based on the entities and relationships generated. 
                     </goal>
 
                     <document_schema>
@@ -131,6 +132,38 @@ class DatabaseUtils:
                             not clearly stated or strongly implied in the chunk.
                         </relationships>
 
+                        <claims>
+                        - A "claim" is an atomic statement in the text that could be true or false,
+                            typically a sentence or clause asserting something about entities
+                            defined in the schema (e.g. a model, dataset, metric, result, theorem).
+                        - For each claim you extract, you MUST:
+                            * Assign a unique local claim id for this chunk (e.g. "c1", "c2", ...).
+                            * Include the exact text span of the claim as it appears in the chunk.
+                            * Provide a structured representation using the schema:
+                            - Reference entities as "fungible" schema-based roles, such as
+                                "Dataset:imagenet", "Model:our_model", etc., not raw strings only.
+                            - Include the main predicate / relation (e.g. performance, comparison,
+                                causal effect) and any key qualifiers (dataset, metric, condition,
+                                time, assumption) as fields defined in the JSON schema.
+                        - Only extract claims that are actually present in the chunk; do NOT infer
+                            additional claims not clearly stated.
+                        </claims>
+
+                        <claim_relations>
+                        - Consider only relations between claims that appear in THIS chunk.
+                            Cross-chunk connections will be handled separately.
+                        - Add a directed "implies" relation when one claim clearly entails another
+                            in the context of the text (e.g. "therefore", "thus", "as a consequence").
+                        - Add a "contradicts" relation when two claims clearly cannot both be true
+                            under the same conditions (e.g. conflicting numbers, opposite statements
+                            about the same entities/context).
+                        - If the relation is ambiguous or weak, do NOT create an edge. Be conservative.
+                        - Each relation you output must:
+                            * Reference the source and target claim ids you assigned.
+                            * Use an allowed relation type from the JSON schema (e.g. "implies",
+                            "contradicts").
+                        </claim_relations>
+
                         <constraints>
                         - Work ONLY with the information in this chunk and the given schema.
                             Do NOT use outside knowledge about the document or domain.
@@ -165,6 +198,27 @@ class DatabaseUtils:
                                 "char_start": 0,
                                 "char_end": 20
                             }}
+                        ],
+                        "claims": [
+                            {{
+                                "id": "c1",
+                                "text": "exact claim text from chunk",
+                                "relation_id": "relation_type_from_schema",
+                                "entities": [
+                                    {{
+                                        "role": "subject",
+                                        "label": "EntityType:identifier"
+                                    }}
+                                ],
+                                "qualifiers": {{}}
+                            }}
+                        ],
+                        "claim_edges": [
+                            {{
+                                "source_claim_id": "c1",
+                                "target_claim_id": "c2",
+                                "relation_type": "implies"
+                            }}
                         ]
                     }}
                     
@@ -173,7 +227,6 @@ class DatabaseUtils:
                 }]
         )
         # Parse the response - handle markdown code blocks if present
-        import json
         import re
         try:
             text = response.content[0].text.strip()
@@ -190,38 +243,167 @@ class DatabaseUtils:
                 text = json_match.group(0)
             
             result = json.loads(text)
-            return result.get('entities', []), result.get('relationships', [])
+            return result.get('entities', []), result.get('relationships', []), result.get('claims', []), result.get('claim_edges', [])
         except json.JSONDecodeError as e:
             # Fallback if response is not valid JSON
             print(f"JSON parsing error: {e}")
             print(f"Response text: {response.content[0].text[:500]}...")  # Print first 500 chars
-            return [], []
+            return [], [], [], []
         except Exception as e:
             print(f"Unexpected error parsing response: {e}")
             print(f"Response text: {response.content[0].text[:500]}...")
-            return [], []
+            return [], [], [], []
 
-    def deduplicate_entities(self, entities: list, project_info: dict) -> list:
-        """Deduplicate entities"""
-        client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
-        res = []
-        for entity_type in project_info.get('entities', []):
-            response = client.messages.create(
-                model="claude-sonnet-4-5-20250929",
-                max_tokens=4096,
-                messages=[
-                    {"role": "user", "content": f"Given this list of entities: {entities}, take the ones of type {entity_type} and deduplicate them by their name and return a list of unique entities as JSON."}
-                ]
-            )
-            import json
-            try:
-                deduplicated = json.loads(response.content[0].text)
-                if isinstance(deduplicated, list):
-                    res.extend(deduplicated)
-            except:
-                pass
+    def deduplicate_entities(self, entities: list, project_info: dict = None) -> list:
+        """Deduplicate entities by grouping them by type_id and normalized name, then merging similar entities"""
+        if not entities:
+            return []
         
-        return res
+        # Group entities by their type_id and normalized name (primary key)
+        def get_entity_key(entity):
+            """Generate a key for grouping entities: type_id + normalized name"""
+            type_id = entity.get('type_id', '')
+            # Use normalized name if available, otherwise use surface text
+            normalized = entity.get('normalized', '') or entity.get('surface', '')
+            return (type_id, normalized.lower().strip())
+        
+        # Group entities by their key
+        entity_groups = {}
+        for entity in entities:
+            key = get_entity_key(entity)
+            if key not in entity_groups:
+                entity_groups[key] = []
+            entity_groups[key].append(entity)
+        
+        # Deduplicate each group
+        client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
+        deduplicated_entities = []
+        
+        for key, entity_bucket in entity_groups.items():
+            # If only one entity in the bucket, no need to deduplicate
+            if len(entity_bucket) == 1:
+                deduplicated_entities.append(entity_bucket[0])
+                continue
+            
+            # Use LLM to deduplicate entities in this bucket
+            try:
+                bucket_json = json.dumps(entity_bucket, indent=2)
+                prompt = f"""<task>
+  <goal>
+    Given a group of similar entities that share the same primary key
+    (same type_id and normalized name), merge redundant entities into one
+    or more cleaned-up entity instances.
+  </goal>
+
+  <entity_bucket>
+    <!--
+      JSON array of entity objects that all share the same primary key.
+      Each entity has the SAME (type_id, normalized_name) key.
+      Typical fields per entity:
+        - "id":        entity id (e.g. "e_17")
+        - "type_id":   entity type from schema (e.g. "PERSON", "DISEASE")
+        - "surface":   exact text span as it appears in the document
+        - "normalized": normalized name (e.g. "ImageNet", "ResNet-50")
+        - "char_start": optional character offset of the start
+        - "char_end": optional character offset of the end
+    -->
+    <![CDATA[
+{bucket_json}
+    ]]>
+  </entity_bucket>
+
+  <guidelines>
+    - All input entities in this bucket have the same primary key
+      (same type_id and same normalized name), but may differ
+      in surface text, character positions, or minor details.
+    - Your job is to:
+      * Identify entities that are effectively referring to the SAME
+        real-world entity, and merge them.
+      * For each merge, produce a single new entity object that combines
+        their information (like a union), while removing redundancy.
+    - Be conservative:
+      * If an entity appears to refer to a genuinely different instance
+        that cannot be safely merged, you may leave it out of any merge
+        and it will remain as-is.
+      * It is acceptable for some entities to remain unmerged.
+
+    - When creating a merged entity:
+      * Choose an id that is one of the source entity ids.
+      * Keep the same type_id as the bucket.
+      * Use the normalized name as the primary identifier.
+      * Combine surface texts if they differ (or use the most representative one).
+      * Merge character positions to cover the full span if needed.
+  </guidelines>
+
+</task>
+
+<output_format>
+You MUST return your response as valid JSON only, with this exact structure:
+{{
+  "merges": [
+    {{
+      "source_ids": ["e1", "e2"],
+      "merged_entity": {{
+        "id": "e1",
+        "type_id": "entity_type",
+        "surface": "representative surface text",
+        "normalized": "normalized_name",
+        "char_start": 0,
+        "char_end": 10
+      }}
+    }}
+  ],
+  "unmerged": [
+    {{
+      "id": "e3",
+      "type_id": "entity_type",
+      "surface": "surface text",
+      "normalized": "normalized_name",
+      "char_start": 0,
+      "char_end": 10
+    }}
+  ]
+}}
+
+Return ONLY the JSON object, no other text or explanation.
+</output_format>"""
+                
+                response = client.messages.create(
+                    model="claude-sonnet-4-5-20250929",
+                    max_tokens=4096,
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                
+                # Parse response
+                import re
+                text = response.content[0].text.strip()
+                # Remove markdown code blocks if present
+                text = re.sub(r'^```(?:json)?\s*\n', '', text, flags=re.MULTILINE)
+                text = re.sub(r'\n```\s*$', '', text, flags=re.MULTILINE)
+                text = text.strip()
+                
+                # Extract JSON
+                json_match = re.search(r'\{.*\}', text, re.DOTALL)
+                if json_match:
+                    text = json_match.group(0)
+                
+                result = json.loads(text)
+                
+                # Add merged entities
+                for merge in result.get('merges', []):
+                    deduplicated_entities.append(merge['merged_entity'])
+                
+                # Add unmerged entities
+                deduplicated_entities.extend(result.get('unmerged', []))
+                
+            except Exception as e:
+                print(f"Error deduplicating entity bucket: {e}")
+                # If deduplication fails, keep all original entities
+                deduplicated_entities.extend(entity_bucket)
+        
+        return deduplicated_entities
 
     def extract_claims(self, chunk: str, schema: str, project_info: dict, doc_id: str = "unknown", chunk_index: int = 0, total_chunks: int = 1) -> Tuple[List[Dict], List[Dict]]:
         """Extract claims and claim relationships from a chunk of content"""
@@ -339,7 +521,6 @@ Return ONLY the JSON object, no other text or explanation.
         )
         
         # Parse the response - handle markdown code blocks if present
-        import json
         import re
         try:
             text = response.content[0].text.strip()
@@ -365,29 +546,163 @@ Return ONLY the JSON object, no other text or explanation.
             print(f"Response text: {response.content[0].text[:500]}...")
             return [], []
 
-    def deduplicate_claims(self, claims: list, project_info: dict) -> list:
-        """Deduplicate claims"""
-        client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
-        res = []
-        for claim_type in project_info.get('claims', []):
-            response = client.messages.create(
-                model="claude-sonnet-4-5-20250929",
-                max_tokens=4096,
-                messages=[
-                    {"role": "user", "content": f"Given this list of claims: {claims}, take the ones of type {claim_type} and deduplicate them by their name and return a list of unique claims as JSON."}
-                ]
-            )
-            import json
-            try:
-                deduplicated = json.loads(response.content[0].text)
-                if isinstance(deduplicated, list):
-                    res.extend(deduplicated)
-            except:
-                pass
+    def deduplicate_claims(self, claims: list) -> list:
+        """Deduplicate claims by grouping them by entity labels, then merging similar claims"""
+        if not claims:
+            return []
         
-        return res
+        # Group claims by their entity labels (primary key: relation_id + sorted entity labels)
+        def get_claim_key(claim):
+            """Generate a key for grouping claims: relation_id + sorted entity labels"""
+            relation_id = claim.get('relation_id', '')
+            entities = claim.get('entities', [])
+            # Extract and sort entity labels
+            entity_labels = sorted([entity.get('label', '') for entity in entities if entity.get('label')])
+            return (relation_id, tuple(entity_labels))
+        
+        # Group claims by their key
+        claim_groups = {}
+        for claim in claims:
+            key = get_claim_key(claim)
+            if key not in claim_groups:
+                claim_groups[key] = []
+            claim_groups[key].append(claim)
+        
+        # Deduplicate each group
+        client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
+        deduplicated_claims = []
+        
+        for key, claim_bucket in claim_groups.items():
+            # If only one claim in the bucket, no need to deduplicate
+            if len(claim_bucket) == 1:
+                deduplicated_claims.append(claim_bucket[0])
+                continue
+            
+            # Use LLM to deduplicate claims in this bucket
+            try:
+                bucket_json = json.dumps(claim_bucket, indent=2)
+                prompt = f"""<task>
+  <goal>
+    Given a group of similar claims that share the same primary key
+    (same relation and entity labels), merge redundant claims into one
+    or more cleaned-up claim instances.
+  </goal>
 
-    def add_entities(self, entities: list, relationships: list) -> None:
+  <claim_bucket>
+    <!--
+      JSON array of claim objects that all share the same primary key.
+      Each claim has the SAME (relation_id, sorted entity labels) key.
+      Typical fields per claim:
+        - "id":        claim id (e.g. "c_17")
+        - "text":      claim text as it appears in the document
+        - "relation_id": predicate label (e.g. "achieves_metric")
+        - "entities":  array of {{ "role"?, "label" }} where label is
+                       a fungible schema-based label like "Dataset:imagenet"
+        - "qualifiers": optional object with extra structured info
+                       (e.g. metric values, conditions, time)
+    -->
+    <![CDATA[
+{bucket_json}
+    ]]>
+  </claim_bucket>
+
+  <guidelines>
+    - All input claims in this bucket have the same primary key
+      (same relation_id and same set of entity labels), but may differ
+      in wording, qualifiers, or minor details.
+    - Your job is to:
+      * Identify claims that are effectively saying the SAME fact under
+        the SAME conditions, and merge them.
+      * For each merge, produce a single new claim object that combines
+        their information (like a union), while removing redundancy.
+    - Be conservative:
+      * If a claim appears to add a genuinely different condition, scope,
+        or value that cannot be safely merged, you may leave it out of
+        any merge and it will remain as-is.
+      * It is acceptable for some claims to remain unmerged.
+
+    - When creating a merged claim:
+      * Choose an id that is one of the source claim ids.
+      * Rewrite a clear, concise "text" for the claim that best captures
+        the shared fact.
+      * Keep the same relation_id as the bucket (unless there is a clear
+        and necessary normalization).
+      * Build "entities" so they are consistent with the bucket's primary
+        key (same entity labels, optional roles).
+      * Merge "qualifiers" by combining compatible fields from the
+        source claims (e.g. unify metric values, conditions, notes),
+        omitting conflicting or unclear details.
+  </guidelines>
+
+</task>
+
+<output_format>
+You MUST return your response as valid JSON only, with this exact structure:
+{{
+  "merges": [
+    {{
+      "source_ids": ["c1", "c2"],
+      "merged_claim": {{
+        "id": "c1",
+        "text": "merged claim text",
+        "relation_id": "relation_type",
+        "entities": [{{"label": "EntityType:identifier"}}],
+        "qualifiers": {{}}
+      }}
+    }}
+  ],
+  "unmerged": [
+    {{
+      "id": "c3",
+      "text": "claim text",
+      "relation_id": "relation_type",
+      "entities": [{{"label": "EntityType:identifier"}}],
+      "qualifiers": {{}}
+    }}
+  ]
+}}
+
+Return ONLY the JSON object, no other text or explanation.
+</output_format>"""
+                
+                response = client.messages.create(
+                    model="claude-sonnet-4-5-20250929",
+                    max_tokens=4096,
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                
+                # Parse response
+                import re
+                text = response.content[0].text.strip()
+                # Remove markdown code blocks if present
+                text = re.sub(r'^```(?:json)?\s*\n', '', text, flags=re.MULTILINE)
+                text = re.sub(r'\n```\s*$', '', text, flags=re.MULTILINE)
+                text = text.strip()
+                
+                # Extract JSON
+                json_match = re.search(r'\{.*\}', text, re.DOTALL)
+                if json_match:
+                    text = json_match.group(0)
+                
+                result = json.loads(text)
+                
+                # Add merged claims
+                for merge in result.get('merges', []):
+                    deduplicated_claims.append(merge['merged_claim'])
+                
+                # Add unmerged claims
+                deduplicated_claims.extend(result.get('unmerged', []))
+                
+            except Exception as e:
+                print(f"Error deduplicating claim bucket: {e}")
+                # If deduplication fails, keep all original claims
+                deduplicated_claims.extend(claim_bucket)
+        
+        return deduplicated_claims
+
+    def add_entities(self, entities: list, relationships: list, claims: list = None, claim_edges: list = None) -> None:
         # Create a mapping from entity local IDs to entity data
         entity_map = {}
         
@@ -405,6 +720,10 @@ Return ONLY the JSON object, no other text or explanation.
                     'surface': entity.get('surface', ''),
                     'normalized': entity.get('normalized', entity.get('surface', ''))
                 }
+        
+        # Add claims if provided
+        if claims and claim_edges:
+            self.add_claims(claims, claim_edges, self.graph)
         
         # Now create relationships using the entity mapping
         for relationship in relationships:
@@ -450,14 +769,14 @@ Return ONLY the JSON object, no other text or explanation.
                 # Old format: direct property access
                 try:
                     self.graph.create_relationship(
-                        from_label=relationship.get('from_label', 'Entity'),
-                        from_property=relationship.get('from_property', 'id'),
-                        from_value=relationship.get('from_value'),
-                        to_label=relationship.get('to_label', 'Entity'),
-                        to_property=relationship.get('to_property', 'id'),
-                        to_value=relationship.get('to_value'),
-                        relationship_type=relationship.get('relationship_type', 'RELATED_TO'),
-                    )
+                                from_label=relationship.get('from_label', 'Entity'),
+                                from_property=relationship.get('from_property', 'id'),
+                                from_value=relationship.get('from_value'),
+                                to_label=relationship.get('to_label', 'Entity'),
+                                to_property=relationship.get('to_property', 'id'),
+                                to_value=relationship.get('to_value'),
+                                relationship_type=relationship.get('relationship_type', 'RELATED_TO'),
+                            )
                 except Exception as e:
                     print(f"Error creating relationship (old format): {e}")
         
@@ -465,7 +784,6 @@ Return ONLY the JSON object, no other text or explanation.
 
     def _flatten_properties_for_neo4j(self, properties: Dict[str, Any]) -> Dict[str, Any]:
         """Flatten nested objects/arrays to JSON strings for Neo4j compatibility"""
-        import json
         flattened = {}
         for key, value in properties.items():
             if isinstance(value, (dict, list)):
@@ -551,5 +869,6 @@ Return ONLY the JSON object, no other text or explanation.
         
         return None
 
+    #def detect_conflicts
 
 

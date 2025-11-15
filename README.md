@@ -98,6 +98,12 @@ npm install
 npm run dev
 ```
 
+Create a `.env` file in the `logical.ly` directory:
+
+```env
+CLAUDE_API_KEY=your_claude_api_key
+```
+
 The frontend will be available at [http://localhost:3000](http://localhost:3000)
 
 ### Backend Setup

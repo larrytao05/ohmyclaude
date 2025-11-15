@@ -2,7 +2,7 @@
 
 AI-powered web app built for the CBC hackathon that connects a TypeScript frontend with a Python backend to talk to Claude and automate reasoning-heavy tasks.
 
-> **Note:** This project is structured as a monorepo with `backend/`, `frontend/`, and `logical.ly/` directories. The frontend is written in TypeScript and the backend in Python.
+> **Note:** This project is structured as a monorepo with `backend/`, `frontend/`, and `logical.ly/` directories. The frontend is written in TypeScript and the backend in Python. **Run `npm run dev` under logical.ly/**
 
 ---
 
@@ -78,6 +78,8 @@ how to maintain clean API boundaries
 --
 
 ## Installation
+
+
 
 ### Prerequisites
 

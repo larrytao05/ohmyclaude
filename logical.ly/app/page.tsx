@@ -1,6 +1,7 @@
-import Editor from './editor';
 
-export default function Home() {
-  return <Editor />;
+import Home from './home';
+
+export default function Page() {
+  return <Home />;
 }
 

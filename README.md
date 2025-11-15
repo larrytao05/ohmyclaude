@@ -220,6 +220,7 @@ On the upload page, you'll see a form split into two sections:
 3. **Claim Extraction**:
    - The main document is processed to extract claims
    - Each claim is compared against the knowledge graph
+   - Some claims that are considered facts are checked using Claude web search to verify for uncertainty
 
 4. **Analysis & Highlighting**:
    - Claims are categorized as supported, contradicted, or uncertain

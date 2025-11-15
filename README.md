@@ -391,6 +391,6 @@ We integrated:
 
 ## Contributors:
 Larry Tao:
-Nathan Dang:
+Nathan Dang: Implemented editor page as well as fact-checking feature. Created API calls for backend knowledge base processing.
 Rohan Mahajan:
 Shane Lee: Implemented front-end, design process, file upload, and app integration

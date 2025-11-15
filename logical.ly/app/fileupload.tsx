@@ -349,8 +349,8 @@ export default function FileUpload() {
           {/* File upload area */}
           <div
             className={`flex-1 border-2 border-dashed rounded-xl flex items-center justify-center transition-all ${isDragging
-                ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 dark:border-blue-400 shadow-lg scale-[1.02]'
-                : 'border-gray-300 dark:border-gray-600 hover:border-blue-400 dark:hover:border-blue-500 hover:bg-gray-50 dark:hover:bg-gray-800/50 bg-white dark:bg-gray-800 shadow-sm'
+              ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 dark:border-blue-400 shadow-lg scale-[1.02]'
+              : 'border-gray-300 dark:border-gray-600 hover:border-blue-400 dark:hover:border-blue-500 hover:bg-gray-50 dark:hover:bg-gray-800/50 bg-white dark:bg-gray-800 shadow-sm'
               }`}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
@@ -366,13 +366,13 @@ export default function FileUpload() {
               />
               <div className="text-center">
                 <div className={`mx-auto h-16 w-16 mb-5 rounded-full flex items-center justify-center transition-colors ${isDragging
-                    ? 'bg-blue-100 dark:bg-blue-900/30'
-                    : 'bg-gray-100 dark:bg-gray-700'
+                  ? 'bg-blue-100 dark:bg-blue-900/30'
+                  : 'bg-gray-100 dark:bg-gray-700'
                   }`}>
                   <svg
                     className={`h-8 w-8 transition-colors ${isDragging
-                        ? 'text-blue-600 dark:text-blue-400'
-                        : 'text-gray-400 dark:text-gray-500'
+                      ? 'text-blue-600 dark:text-blue-400'
+                      : 'text-gray-400 dark:text-gray-500'
                       }`}
                     stroke="currentColor"
                     fill="none"
@@ -446,8 +446,8 @@ export default function FileUpload() {
             onClick={handleSubmit}
             disabled={!isFormValid || isUploading}
             className={`px-8 py-3.5 rounded-lg font-semibold text-sm transition-all shadow-lg ${isFormValid && !isUploading
-                ? 'bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white cursor-pointer hover:shadow-xl hover:scale-105 active:scale-100'
-                : 'bg-gray-300 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed shadow-none'
+              ? 'bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white cursor-pointer hover:shadow-xl hover:scale-105 active:scale-100'
+              : 'bg-gray-300 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed shadow-none'
               }`}
           >
             {isUploading ? 'Uploading...' : 'Upload'}

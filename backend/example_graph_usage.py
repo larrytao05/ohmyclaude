@@ -195,10 +195,18 @@ def example_create_graph():
     
     #db_utils.create_main_document("HER2 positive breast cancer", "HER2 positive breast cancer", example_claim, graph, schema=example_schema, project_info="Medical knowledge")
     print("Reached 3")
+    
+    # Analyze main-document claims for contradictions against the resource graph
+    contradictions = db_utils.analyze_main_document_contradictions()
+    print("Contradiction analysis results:")
+    for result in contradictions:
+        print(result)
     # except Exception as e:
     #     print(f"Error: {e}")
     # finally:
     #     graph.close()
+    
+    
 
 
 def example_simple_usage():
@@ -230,4 +238,3 @@ if __name__ == '__main__':
     
     # Uncomment to run the simple example instead:
     # example_simple_usage()
-

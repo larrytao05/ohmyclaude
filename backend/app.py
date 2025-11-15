@@ -263,16 +263,16 @@ def create_main_document():
             project_info=project_info,
             doc_id=title,
         )
-
+        analysis = db_utils.analyze_main_document_contradictions()
+        return jsonify({
+            'success': True,
+            'analysis': analysis,
+        }), 200
     except Exception as e:
         return jsonify({
             'success': False,
-            'error': f'Error processing main document: {e}',
+            'error': f'Error analyzing contradictions: {e}',
         }), 500
-
-    return jsonify({
-        'success': True,
-    }), 200
 
 
 @app.route('/api/contradictions/', methods=['GET'])
@@ -285,17 +285,7 @@ def get_contradictions():
     - pairwise_contradictions: List of resource claims that contradict the proposition
     - graph_text_contradictions: Fallback contradictions from graph text export
     """
-    try:
-        analysis = db_utils.analyze_main_document_contradictions()
-        return jsonify({
-            'success': True,
-            'analysis': analysis,
-        }), 200
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': f'Error analyzing contradictions: {e}',
-        }), 500
+    
 
 
 if __name__ == '__main__':

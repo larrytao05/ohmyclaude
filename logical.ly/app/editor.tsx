@@ -1375,15 +1375,29 @@ export default function Editor() {
                     {selectedInsight.graphContradictions.length > 0 && (
                       <div className="space-y-3">
                         <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
-                          Graph-based contradictions
+                          Graph-based contradictions ({selectedInsight.graphContradictions.length})
                         </p>
                         {selectedInsight.graphContradictions.map((item) => (
                           <div
                             key={item.evidence_id}
-                            className="rounded-lg border border-red-100 bg-red-50/60 p-4 text-sm text-zinc-900 dark:border-red-800 dark:bg-red-900/30 dark:text-red-100"
+                            className="rounded-lg border border-red-200 bg-red-50/70 p-4 text-sm text-zinc-900 dark:border-red-800 dark:bg-red-900/20 dark:text-red-100"
                           >
-                            <p className="font-medium">{item.evidence_text}</p>
-                            <p className="mt-2 text-xs text-red-800 dark:text-red-200">{item.reason}</p>
+                            <div className="mb-2 flex items-start justify-between gap-2">
+                              <p className="text-[10px] font-semibold uppercase tracking-wide text-red-800 dark:text-red-200">
+                                Evidence ID: {item.evidence_id}
+                              </p>
+                            </div>
+                            <p className="font-medium text-red-900 dark:text-red-100 mb-2">
+                              {item.evidence_text}
+                            </p>
+                            <div className="mt-3 pt-3 border-t border-red-200 dark:border-red-700">
+                              <p className="text-xs font-semibold uppercase text-red-800 dark:text-red-200 mb-1">
+                                Contradiction Reason
+                              </p>
+                              <p className="text-xs text-red-800 dark:text-red-200 leading-relaxed">
+                                {item.reason}
+                              </p>
+                            </div>
                           </div>
                         ))}
                       </div>
@@ -1610,17 +1624,27 @@ export default function Editor() {
                         {result.graph_text_contradictions.length > 0 && (
                           <div className="mt-3 space-y-2">
                             <p className="text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400">
-                              Graph insights
+                              Graph-based contradictions ({result.graph_text_contradictions.length})
                             </p>
                             {result.graph_text_contradictions.map((item) => (
                               <div
                                 key={item.evidence_id}
-                                className="rounded-lg border border-zinc-100 bg-zinc-50 p-3 text-sm text-zinc-800 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                                className="rounded-lg border border-red-200 bg-red-50/70 p-3 text-sm text-zinc-900 dark:border-red-800 dark:bg-red-900/20 dark:text-red-100"
                               >
-                                <p className="font-medium">{item.evidence_text}</p>
-                                <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-300">
-                                  {item.reason}
+                                <p className="text-[10px] font-semibold uppercase tracking-wide text-red-800 dark:text-red-200 mb-1">
+                                  Evidence ID: {item.evidence_id}
                                 </p>
+                                <p className="font-medium text-red-900 dark:text-red-100 mb-2">
+                                  {item.evidence_text}
+                                </p>
+                                <div className="mt-2 pt-2 border-t border-red-200 dark:border-red-700">
+                                  <p className="text-xs font-semibold uppercase text-red-800 dark:text-red-200 mb-1">
+                                    Reason
+                                  </p>
+                                  <p className="text-xs text-red-800 dark:text-red-200 leading-relaxed">
+                                    {item.reason}
+                                  </p>
+                                </div>
                               </div>
                             ))}
                           </div>

@@ -21,7 +21,7 @@ export async function postSupportingDocument({
     project_info: projectInfo,
   };
 
-  const response = await fetch('/api/supporting-document', {
+  const response = await fetch('http://localhost:8000/api/supporting-document/', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

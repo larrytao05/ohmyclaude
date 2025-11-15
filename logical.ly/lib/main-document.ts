@@ -21,7 +21,7 @@ export async function postMainDocument({
     project_info: projectInfo,
   };
 
-  const response = await fetch('/api/main-document', {
+  const response = await fetch('http://localhost:8000/api/main-document/', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

@@ -413,6 +413,7 @@ export default function FileUpload() {
                     }`}
                 >
                   <option value="">Select a domain</option>
+                  <option value="medical">Medical</option>
                   <option value="software-engineering">Software Engineering</option>
                   <option value="data-science">Data Science</option>
                   <option value="machine-learning">Machine Learning</option>

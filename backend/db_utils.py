@@ -5,6 +5,9 @@ from graph_utils import Neo4jGraph
 from typing import Dict, Any, List, Tuple, Optional
 
 
+TOP_K_CLAIM_MATCHES = 5
+
+
 class DatabaseUtils:
     def __init__(self, graph: Neo4jGraph):
         """Initialize database connection"""
@@ -74,6 +77,7 @@ class DatabaseUtils:
                 #deduplicated_claims = self.deduplicate_claims(claims, project_info)
                 # add entities and relationships to database
                 self.add_claims(claims, claim_edges, graph)
+                
 
     def extract_entities(self, chunk: str, schema: str, project_info: dict) -> Tuple[List[Dict], List[Dict]]:
         """Extract entities and relationships from a chunk of content"""
@@ -463,6 +467,504 @@ Return ONLY the JSON object, no other text or explanation.
         
         return None
 
+    def get_top_resource_claim_matches(self, main_claim: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Given a main-document claim, retrieve the most relevant resource claims
+        from the graph using a simple overlap-based scoring heuristic.
+
+        Scoring heuristic:
+        - +1 if the relationship type (relation_id) is shared
+        - +1 for each shared entity label (exact match on the 'label' field)
+
+        The function returns up to TOP_K_CLAIM_MATCHES highest-scoring resource claims.
+        """
+        import json
+
+        # Extract canonical features from the main-document claim
+        main_relation_id = main_claim.get("relation_id")
+        main_entities = {
+            entity.get("label")
+            for entity in main_claim.get("entities", [])
+            if isinstance(entity, dict) and entity.get("label")
+        }
+        main_text = main_claim.get("text")
+
+        # Fetch all Claim nodes from the graph (treated as resource claims for now)
+        claim_nodes = self.graph.get_all_nodes(label="Claim")
+
+        candidates: List[Dict[str, Any]] = []
+
+        for node in claim_nodes:
+            properties = node.get("properties", {})
+
+            # Optionally skip claims that appear to be the same as the main claim
+            if properties.get("text") == main_text:
+                continue
+
+            # Decode entities stored on the Claim node (may be JSON-encoded)
+            raw_entities = properties.get("entities")
+            entities_list: List[Dict[str, Any]] = []
+
+            if isinstance(raw_entities, str):
+                try:
+                    decoded = json.loads(raw_entities)
+                    if isinstance(decoded, list):
+                        entities_list = decoded
+                except Exception:
+                    entities_list = []
+            elif isinstance(raw_entities, list):
+                entities_list = raw_entities
+
+            node_entities = {
+                entity.get("label")
+                for entity in entities_list
+                if isinstance(entity, dict) and entity.get("label")
+            }
+
+            # Compute score based on overlapping relation_id and entity labels
+            score = 0
+
+            if main_relation_id and properties.get("relation_id") == main_relation_id:
+                score += 1
+
+            shared_entities = main_entities.intersection(node_entities)
+            score += len(shared_entities)
+
+            # Only keep claims that share at least one entity or the relationship type
+            if score <= 0:
+                continue
+
+            candidates.append(
+                {
+                    "node_id": node.get("id"),
+                    "score": score,
+                    "shared_entities": list(shared_entities),
+                    "shared_relation": bool(
+                        main_relation_id and properties.get("relation_id") == main_relation_id
+                    ),
+                    "claim": properties,
+                }
+            )
+
+        # Sort by score descending and return top-k matches
+        candidates.sort(key=lambda c: c["score"], reverse=True)
+        return candidates[:TOP_K_CLAIM_MATCHES]
+
+    def get_contradicting_resource_claims(
+        self,
+        main_claim: Dict[str, Any],
+        resource_claims: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Given a main-document claim and a list of candidate resource claims,
+        use an LLM to identify which resource claims clearly contradict
+        the main claim.
+
+        Returns a list of objects with at least:
+            - resource_claim_id: str
+            - reason: Optional[str]
+        following the provided JSON schema.
+        """
+        import json
+        import anthropic
+        import os
+        import re
+
+        if not resource_claims:
+            return []
+
+        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+        main_claim_json = json.dumps(main_claim, ensure_ascii=False)
+        resource_claims_json = json.dumps(resource_claims, ensure_ascii=False)
+
+        prompt = f"""<task>
+  <goal>
+    Given one main-document claim and a set of similar resource claims,
+    identify which resource claims clearly contradict the main claim.
+    Ignore claims that merely support, are neutral, or are unclear.
+  </goal>
+
+  <main_claim>
+    <![CDATA[
+{main_claim_json}
+    ]]>
+  </main_claim>
+
+  <resource_claims>
+    <![CDATA[
+{resource_claims_json}
+    ]]>
+  </resource_claims>
+
+  <guidelines>
+    - Work only with the information in the main claim and the provided
+      resource claims. Do NOT assume external facts.
+    - Mark a resource claim as CONTRADICTING the main claim only if,
+      under reasonably similar conditions, they cannot both be true.
+      Typical signs of contradiction include:
+        * Opposite assertions about the same quantity or relationship.
+        * Clearly incompatible numeric values (e.g. one says 85%,
+          another says 60% for the same model/dataset/metric setup).
+        * Mutually exclusive outcomes asserted under similar conditions.
+    - If differences in conditions (dataset split, metric definition,
+      experimental setup, assumptions) might explain the discrepancy,
+      and it is not clearly a direct conflict, treat it as NOT a clear
+      contradiction and do not mark it.
+    - Be conservative: only flag strong, clear contradictions. It is
+      better to miss a borderline case than to label a non-contradiction
+      as a contradiction.
+  </guidelines>
+
+  <output_instructions>
+    - Use the JSON schema provided by the caller to:
+      * Return a list of resource claim ids that clearly contradict the
+        main claim.
+      * Optionally include a short explanation for each contradiction,
+        referencing the main claim and the specific resource claim.
+    - You do NOT need to produce any output entries for resource claims
+      that do not contradict the main claim; they are treated as neutral,
+      supportive, or unclear by default.
+    - Do NOT output any free-form text outside of the JSON fields.
+  </output_instructions>
+</task>
+
+<output_format>
+You MUST return your response as valid JSON only, with this exact structure:
+{{
+  "type": "json_schema",
+  "schema": {{
+    "type": "object",
+    "properties": {{
+      "contradictions": {{
+        "type": "array",
+        "description": "Resource claims that clearly contradict the main claim.",
+        "items": {{
+          "type": "object",
+          "properties": {{
+            "resource_claim_id": {{
+              "type": "string",
+              "description": "The id of a resource claim that clearly contradicts the main claim."
+            }},
+            "reason": {{
+              "type": "string",
+              "description": "Optional short explanation of why this resource claim contradicts the main claim."
+            }}
+          }},
+          "required": ["resource_claim_id"],
+          "additionalProperties": false
+        }}
+      }}
+    }},
+    "required": ["contradictions"],
+    "additionalProperties": false
+  }}
+}}
+
+Return ONLY the JSON object, no other text or explanation.
+</output_format>"""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-5-20250929",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        try:
+            text = response.content[0].text.strip()
+
+            # Remove markdown code block markers if present
+            text = re.sub(r"^```(?:json)?\s*\n", "", text, flags=re.MULTILINE)
+            text = re.sub(r"\n```\s*$", "", text, flags=re.MULTILINE)
+            text = text.strip()
+
+            # Try to find JSON object in the text (in case there's extra text)
+            json_match = re.search(r"\{.*\}", text, re.DOTALL)
+            if json_match:
+                text = json_match.group(0)
+
+            result = json.loads(text)
+            contradictions = result.get("contradictions", [])
+            if isinstance(contradictions, list):
+                return contradictions
+            return []
+        except json.JSONDecodeError as e:
+            print(f"JSON parsing error in get_contradicting_resource_claims: {e}")
+            print(f"Response text: {response.content[0].text[:500]}...")
+            return []
+        except Exception as e:
+            print(f"Unexpected error parsing contradictions response: {e}")
+            print(f"Response text: {response.content[0].text[:500]}...")
+            return []
+
+    def assess_claim_with_graph_text(self, main_claim: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Fallback: export the resource graph as text, treat each line as
+        an evidence snippet, and ask the LLM which snippets clearly
+        contradict the main claim.
+        """
+        import json
+        import re
+
+        graph_text = ""
+        try:
+            graph_text = self.graph.export_graph_as_text(
+                include_claims=True,
+                include_relationship_facts=True,
+                rel_type_filter=None,
+            )
+        except Exception as e:
+            print(f"Error exporting graph as text: {e}")
+            return {"contradictions": []}
+
+        if not graph_text:
+            return {"contradictions": []}
+
+        # Build evidence snippets from the graph text (one line per snippet)
+        evidence_items = []
+        for idx, line in enumerate(graph_text.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            evidence_items.append(
+                {
+                    "id": f"evidence_{idx}",
+                    "text": line,
+                    "provenance": "graph_export",
+                }
+            )
+
+        if not evidence_items:
+            return {"contradictions": []}
+
+        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+        main_claim_json = json.dumps(main_claim, ensure_ascii=False)
+        evidence_items_json = json.dumps(evidence_items, ensure_ascii=False)
+
+        prompt = f"""<task>
+  <goal>
+    Given one contested claim and a set of textual evidence snippets
+    retrieved from the resource graph, identify which snippets clearly
+    contradict the claim. Ignore snippets that merely support, are
+    neutral, or are unclear.
+  </goal>
+
+  <main_claim>
+    <![CDATA[
+{main_claim_json}
+    ]]>
+  </main_claim>
+
+  <evidence_items>
+    <![CDATA[
+{evidence_items_json}
+    ]]>
+  </evidence_items>
+
+  <guidelines>
+    - Work only with the information in the main claim and the provided
+      evidence snippets. Do NOT assume external facts.
+    - Mark an evidence snippet as CONTRADICTING the main claim only if,
+      taking the snippet at face value and under reasonably similar
+      conditions, the snippet and the claim cannot both be true.
+      Typical signs of contradiction include:
+        * Opposite assertions about the same quantity or relationship.
+        * Clearly incompatible numeric values for the same model/dataset/
+          metric setup (e.g. one says 85% accuracy, another says 60%).
+        * Mutually exclusive outcomes asserted under similar conditions.
+    - If differences in conditions (dataset split, metric definition,
+      experimental setup, assumptions) could reasonably explain the
+      discrepancy, and it is not clearly a direct conflict, treat it as
+      NOT a clear contradiction and do not mark it.
+    - Be conservative: only flag strong, clear contradictions. It is
+      better to miss a borderline case than to label a non-contradiction
+      as a contradiction.
+  </guidelines>
+
+  <output_instructions>
+    - Use the JSON schema provided by the caller to:
+      * Return a list of evidence item ids that clearly contradict the
+        main claim.
+      * Optionally include a short explanation for each contradiction,
+        referencing the main claim and the specific evidence id.
+    - You do NOT need to produce any output entries for evidence items
+      that do not contradict the main claim; they are treated as neutral,
+      supportive, or unclear by default.
+    - Do NOT output any free-form text outside of the JSON fields.
+  </output_instructions>
+</task>
+
+
+<output_format>
+You MUST return your response as valid JSON only, with this exact structure:
+{{
+  "type": "json_schema",
+  "schema": {{
+    "type": "object",
+    "properties": {{
+      "contradictions": {{
+        "type": "array",
+        "description": "Evidence snippets that clearly contradict the main claim.",
+        "items": {{
+          "type": "object",
+          "properties": {{
+            "evidence_id": {{
+              "type": "string",
+              "description": "The id of an evidence snippet that clearly contradicts the main claim."
+            }},
+            "reason": {{
+              "type": "string",
+              "description": "Optional short explanation of why this evidence contradicts the main claim."
+            }}
+          }},
+          "required": ["evidence_id"],
+          "additionalProperties": false
+        }}
+      }}
+    }},
+    "required": ["contradictions"],
+    "additionalProperties": false
+  }}
+}}
+
+Return ONLY the JSON object, no other text or explanation.
+</output_format>"""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-5-20250929",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        try:
+            text = response.content[0].text.strip()
+
+            # Remove markdown code block markers if present
+            text = re.sub(r"^```(?:json)?\s*\n", "", text, flags=re.MULTILINE)
+            text = re.sub(r"\n```\s*$", "", text, flags=re.MULTILINE)
+            text = text.strip()
+
+            # Try to find JSON object in the text (in case there's extra text)
+            json_match = re.search(r"\{.*\}", text, re.DOTALL)
+            if json_match:
+                text = json_match.group(0)
+
+            result = json.loads(text)
+            contradictions = result.get("contradictions", [])
+            if isinstance(contradictions, list):
+                return {"contradictions": contradictions}
+            return {"contradictions": []}
+        except json.JSONDecodeError as e:
+            print(f"JSON parsing error in assess_claim_with_graph_text: {e}")
+            print(f"Response text: {response.content[0].text[:500]}...")
+            return {"contradictions": []}
+        except Exception as e:
+            print(f"Unexpected error parsing graph-text assessment response: {e}")
+            print(f"Response text: {response.content[0].text[:500]}...")
+            return {"contradictions": []}
+
+    def analyze_main_document_contradictions(self) -> List[Dict[str, Any]]:
+        """
+        Analyze all main-document claims in the graph for potential contradictions.
+
+        For each Claim node in the graph:
+          1) Find top-k overlapping resource claims using get_top_resource_claim_matches.
+          2) Ask the LLM which of those resource claims clearly contradict the claim.
+          3) If no contradictions are found, fall back to assessing the claim against
+             the full text export of the graph.
+
+        Returns a list of per-claim analysis results.
+        """
+        import json
+
+        # For now, treat all Claim nodes as main claims and use
+        # other Claim nodes as resource claims.
+        claim_nodes = self.graph.get_all_nodes(label="Claim")
+
+        results: List[Dict[str, Any]] = []
+
+        for node in claim_nodes:
+            properties = node.get("properties", {})
+
+            # Reconstruct a main-claim structure compatible with our LLM prompts
+            main_claim = {
+                "id": str(properties.get("id", node.get("id"))),
+                "text": properties.get("text", ""),
+                "relation_id": properties.get("relation_id"),
+                "entities": [],
+                "qualifiers": properties.get("qualifiers"),
+            }
+
+            # Decode entities if present on the main claim
+            raw_entities = properties.get("entities")
+            if isinstance(raw_entities, str):
+                try:
+                    decoded = json.loads(raw_entities)
+                    if isinstance(decoded, list):
+                        main_claim["entities"] = decoded
+                except Exception:
+                    main_claim["entities"] = []
+            elif isinstance(raw_entities, list):
+                main_claim["entities"] = raw_entities
+
+            # 1) Top-k resource claim matches
+            top_matches = self.get_top_resource_claim_matches(main_claim)
+
+            # Prepare resource claims in the expected shape for the LLM
+            resource_claims_for_llm: List[Dict[str, Any]] = []
+            for candidate in top_matches:
+                claim_props = candidate.get("claim", {})
+
+                # Decode entities on the candidate claim
+                candidate_entities = []
+                c_raw_entities = claim_props.get("entities")
+                if isinstance(c_raw_entities, str):
+                    try:
+                        decoded = json.loads(c_raw_entities)
+                        if isinstance(decoded, list):
+                            candidate_entities = decoded
+                    except Exception:
+                        candidate_entities = []
+                elif isinstance(c_raw_entities, list):
+                    candidate_entities = c_raw_entities
+
+                resource_claims_for_llm.append(
+                    {
+                        "id": str(claim_props.get("id", candidate.get("node_id"))),
+                        "text": claim_props.get("text", ""),
+                        "relation_id": claim_props.get("relation_id"),
+                        "entities": candidate_entities,
+                        "qualifiers": claim_props.get("qualifiers"),
+                        "provenance": claim_props.get("provenance"),
+                    }
+                )
+
+            claim_contradictions: List[Dict[str, Any]] = []
+            if resource_claims_for_llm:
+                claim_contradictions = self.get_contradicting_resource_claims(
+                    main_claim=main_claim,
+                    resource_claims=resource_claims_for_llm,
+                )
+
+            # 2) Fallback to graph-text assessment if no direct claim contradictions
+            graph_text_contradictions: List[Dict[str, Any]] = []
+            if not claim_contradictions:
+                graph_text_result = self.assess_claim_with_graph_text(main_claim)
+                graph_text_contradictions = graph_text_result.get("contradictions", [])
+
+            results.append(
+                {
+                    "main_claim_id": main_claim["id"],
+                    "main_claim_text": main_claim["text"],
+                    "top_resource_claims": resource_claims_for_llm,
+                    "claim_contradictions": claim_contradictions,
+                    "graph_text_contradictions": graph_text_contradictions,
+                }
+            )
+
+        return results
+
     def _flatten_properties_for_neo4j(self, properties: Dict[str, Any]) -> Dict[str, Any]:
         """Flatten nested objects/arrays to JSON strings for Neo4j compatibility"""
         import json
@@ -550,6 +1052,3 @@ Return ONLY the JSON object, no other text or explanation.
                     print(f"Error creating claim relationship (old format): {e}")
         
         return None
-
-
-

@@ -1198,7 +1198,8 @@ Return ONLY the JSON object, no other text or explanation.
 
         # For now, treat all Claim nodes as main claims and use
         # other Claim nodes as resource claims.
-        claim_nodes = self.graph.get_all_nodes(label="Claim")
+        claim_nodes = self.graph.get_all_nodes(label="Proposition")
+        print(f"Got all claim nodes: {len(claim_nodes)}")
 
         results: List[Dict[str, Any]] = []
 
@@ -1228,6 +1229,8 @@ Return ONLY the JSON object, no other text or explanation.
 
             # 1) Top-k resource claim matches
             top_matches = self.get_top_resource_claim_matches(main_claim)
+
+            print("Got top K matches")
 
             # Prepare resource claims in the expected shape for the LLM
             resource_claims_for_llm: List[Dict[str, Any]] = []

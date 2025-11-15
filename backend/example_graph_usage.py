@@ -7,7 +7,7 @@ Run this after starting Neo4j with: docker-compose up -d
 from graph_utils import Neo4jGraph
 from db_utils import DatabaseUtils
 
-example_claim = "According to the web search results, therecommended first line of treatment for HER2+ metastatic breast cancer is **chemotherapy plusHER2-directed therapy**, which are drugs that target the HER2 protein on cancer cells."
+example_claim = "According to the web search results, you should never use **chemotherapy plusHER2-directed therapy** to treat HER2+ metastatic breast cancer."
 example_supporting_doc = """By Wade Smith, MD, as told to Kara Mayer Robinson. A diagnosis of HER2 positive breast cancer can be frightening at first, especially when you hear the words "aggressive cancer." But there is reason to be optimistic about todays advances in treatment. There is not a one size fits all approach, but with the help of your doctors, you can choose what is best for you.
 
 Your Treatment Is Unique

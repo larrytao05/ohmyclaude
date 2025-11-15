@@ -1,0 +1,17 @@
+[
+  {
+    "document_title": "Quarterly_Report_Q3.pdf",
+    "description": "A summary of company performance, sales figures, and marketing analytics for the third quarter.",
+    "content": "Executive Summary: Q3 saw a 15% growth in revenue, largely driven by the new product line. Market share increased by 2%. Detailed breakdowns follow..."
+  },
+  {
+    "document_title": "Project_Phoenix_Specs.docx",
+    "description": "Technical specifications and requirements for the upcoming Project Phoenix deployment.",
+    "content": "1. Introduction: This document outlines the technical requirements for Project Phoenix. 2. System Architecture: The system will be built on a microservices-based architecture..."
+  },
+  {
+    "document_title": "Meeting_Notes_2025-11-14.txt",
+    "description": "Minutes and action items from the weekly team sync meeting.",
+    "content": "Attendees: Alice, Bob, Charlie. Action Items: 1. Bob to finalize the API documentation by EOD Friday. 2. Alice to review the user feedback from the beta test..."
+  }
+]

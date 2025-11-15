@@ -173,6 +173,130 @@ class Neo4jGraph:
                 'labels': list(node.labels),
                 'properties': dict(node)
             } for node in nodes]
+
+    def export_graph_as_text(
+        self,
+        include_claims: bool = True,
+        include_relationship_facts: bool = True,
+        rel_type_filter: Optional[List[str]] = None,
+    ) -> str:
+        """
+        Export the graph as a text corpus.
+
+        This generates simple, human-readable lines for:
+          - Claim nodes (if include_claims=True)
+          - Relationship-based "fact" lines (if include_relationship_facts=True)
+        """
+        lines: List[str] = []
+
+        with self.driver.session() as session:
+            if include_claims:
+                def _get_claims(tx):
+                    query = """
+                    MATCH (c:Claim)
+                    RETURN
+                        id(c)         AS claim_id,
+                        c.text        AS text,
+                        c.relation_id AS relation_id,
+                        c.entities    AS entities,
+                        c.provenance  AS provenance
+                    """
+                    return list(tx.run(query))
+
+                claim_rows = session.execute_read(_get_claims)
+
+                for row in claim_rows:
+                    cid = row["claim_id"]
+                    text = row["text"] or ""
+                    provenance = row["provenance"] or "unknown"
+
+                    line = f"CLAIM {cid}: {text} (source: {provenance})"
+                    lines.append(line)
+
+            if include_relationship_facts:
+                def _get_fact_relationships(tx, rel_types: Optional[List[str]]):
+                    if rel_types:
+                        query = """
+                        MATCH (s)-[r]->(t)
+                        WHERE type(r) IN $rel_types
+                        RETURN
+                            id(r)         AS rel_id,
+                            type(r)       AS rel_type,
+                            labels(s)     AS source_labels,
+                            coalesce(
+                                s.name,
+                                s.text,
+                                s.normalized,
+                                s.surface
+                            )            AS source_name,
+                            labels(t)     AS target_labels,
+                            coalesce(
+                                t.name,
+                                t.text,
+                                t.normalized,
+                                t.surface
+                            )            AS target_name,
+                            properties(r) AS props
+                        """
+                        return list(tx.run(query, rel_types=rel_types))
+                    else:
+                        query = """
+                        MATCH (s)-[r]->(t)
+                        RETURN
+                            id(r)         AS rel_id,
+                            type(r)       AS rel_type,
+                            labels(s)     AS source_labels,
+                            coalesce(
+                                s.name,
+                                s.text,
+                                s.normalized,
+                                s.surface
+                            )            AS source_name,
+                            labels(t)     AS target_labels,
+                            coalesce(
+                                t.name,
+                                t.text,
+                                t.normalized,
+                                t.surface
+                            )            AS target_name,
+                            properties(r) AS props
+                        """
+                        return list(tx.run(query))
+
+                rel_rows = session.execute_read(_get_fact_relationships, rel_type_filter)
+
+                for row in rel_rows:
+                    rid = row["rel_id"]
+                    rtype = row["rel_type"]
+
+                    source_name = row["source_name"]
+                    target_name = row["target_name"]
+
+                    if not source_name:
+                        labels = row["source_labels"] or []
+                        source_name = ":".join(labels) if labels else "(no_source_name)"
+                    if not target_name:
+                        labels = row["target_labels"] or []
+                        target_name = ":".join(labels) if labels else "(no_target_name)"
+
+                    props = row["props"] or {}
+                    interesting_keys = {"value", "metric", "split", "provenance"}
+                    filtered_props = {
+                        k: v for k, v in props.items() if k in interesting_keys and v is not None
+                    }
+
+                    props_str = ""
+                    if filtered_props:
+                        kv_parts = [f"{k}={v}" for k, v in filtered_props.items()]
+                        props_str = " [" + ", ".join(kv_parts) + "]"
+
+                    line = (
+                        f"FACT {rid}: {source_name} -[{rtype}]-> {target_name}"
+                        f"{props_str}"
+                    )
+                    lines.append(line)
+
+        return "\n".join(lines)
     
     def delete_all(self):
         """Delete all nodes and relationships (use with caution!)"""

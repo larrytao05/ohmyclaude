@@ -38,3 +38,10 @@ body {
   color: var(--foreground);
   font-family: var(--font-inter), system-ui, -apple-system, sans-serif;
 }
+
+/* Disable color transitions for instant theme changes */
+*,
+*::before,
+*::after {
+  transition-property: transform, opacity, box-shadow, border-width !important;
+}

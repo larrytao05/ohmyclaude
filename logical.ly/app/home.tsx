@@ -3,7 +3,7 @@ import ThemeToggle from './components/ThemeToggle';
 
 export default function Home() {
   return (
-    <div className="min-h-screen bg-white dark:bg-black flex flex-col">
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-900 dark:to-black flex flex-col">
       {/* Navigation */}
       <nav className="w-full px-8 py-6 flex justify-between items-center border-b border-gray-200 dark:border-gray-800">
         <div className="text-2xl font-bold text-black dark:text-white">

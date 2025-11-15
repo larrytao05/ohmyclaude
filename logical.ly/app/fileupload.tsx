@@ -1,9 +1,15 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import ThemeToggle from './components/ThemeToggle';
+import * as pdfjsLib from 'pdfjs-dist';
+
+// Configure worker to use local file from public directory
+if (typeof window !== 'undefined') {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `${window.location.origin}/pdf.worker.min.js`;
+}
 
 interface FileWithDescription {
   file: File;
@@ -22,6 +28,19 @@ export default function FileUpload() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
   const [showExitConfirm, setShowExitConfirm] = useState(false);
+  const [touchedFields, setTouchedFields] = useState({
+    title: false,
+    description: false,
+    domain: false,
+    files: false,
+  });
+
+  // Ensure worker is configured on mount
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = `${window.location.origin}/pdf.worker.min.js`;
+    }
+  }, []);
 
   const hasUnsavedData = () => {
     return (
@@ -52,6 +71,7 @@ export default function FileUpload() {
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       processFiles(e.target.files);
+      setTouchedFields({ ...touchedFields, files: true });
     }
   };
 
@@ -98,6 +118,26 @@ export default function FileUpload() {
     );
   };
 
+  const clearAllTextFields = () => {
+    setTitle('');
+    setProjectDescription('');
+    setTechnicalDomain('');
+    setTouchedFields({
+      title: false,
+      description: false,
+      domain: false,
+      files: touchedFields.files,
+    });
+  };
+
+  const clearAllFiles = () => {
+    setUploadedFiles([]);
+    setTouchedFields({
+      ...touchedFields,
+      files: false,
+    });
+  };
+
   const isFormValid =
     title.trim() !== '' &&
     projectDescription.trim() !== '' &&
@@ -113,36 +153,88 @@ export default function FileUpload() {
     return missing;
   };
 
+  const extractTextFromPDF = async (file: File): Promise<string> => {
+    try {
+      console.log('Starting PDF extraction for:', file.name);
+      const arrayBuffer = await file.arrayBuffer();
+      console.log('File loaded, size:', arrayBuffer.byteLength);
+
+      const loadingTask = pdfjsLib.getDocument({
+        data: arrayBuffer,
+        verbosity: 0, // Suppress warnings
+        useSystemFonts: true,
+      });
+      const pdf = await loadingTask.promise;
+
+      console.log('PDF loaded, pages:', pdf.numPages);
+      let fullText = '';
+
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const textContent = await page.getTextContent();
+        const pageText = textContent.items
+          .map((item: any) => item.str)
+          .join(' ');
+        fullText += pageText + '\n\n';
+        console.log(`Page ${i} extracted, text length:`, pageText.length);
+      }
+
+      const result = fullText.trim();
+      console.log('Total extracted text length:', result.length);
+      return result;
+    } catch (error) {
+      console.error('Error extracting text from PDF:', error);
+      console.error('Error details:', error instanceof Error ? error.message : String(error));
+      return '';
+    }
+  };
+
+  const extractTextFromFile = async (file: File): Promise<string> => {
+    console.log('Extracting text from file:', file.name, 'Type:', file.type);
+
+    if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+      return await extractTextFromPDF(file);
+    } else if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
+      return await file.text();
+    } else {
+      // For DOC/DOCX files, return empty string for now
+      // You can add support for these formats later using libraries like 'mammoth'
+      console.log('Unsupported file type, returning empty string');
+      return '';
+    }
+  };
+
   const handleSubmit = async () => {
     if (isFormValid && !isUploading) {
       setIsUploading(true);
       setUploadProgress(0);
 
       try {
+        // Extract text content from all files
+        setUploadProgress(10);
+        const filesWithContent = await Promise.all(
+          uploadedFiles.map(async (fileItem, index) => {
+            const content = await extractTextFromFile(fileItem.file);
+            setUploadProgress(10 + (index + 1) * (70 / uploadedFiles.length));
+            return {
+              fileName: fileItem.file.name,
+              fileType: fileItem.file.type,
+              description: fileItem.description,
+              content: content,
+              order: index + 1, // Unique sequential number (1, 2, 3, 4...)
+            };
+          })
+        );
+
         // Create JSON object with all form data
         const projectData = {
           title,
           projectDescription,
           technicalDomain,
-          uploadedFiles: uploadedFiles.map((fileItem, index) => ({
-            fileName: fileItem.file.name,
-            fileType: fileItem.file.type,
-            description: fileItem.description,
-            order: index + 1, // Unique sequential number (1, 2, 3, 4...)
-          })),
+          uploadedFiles: filesWithContent,
         };
 
-        // Simulate progress for JSON save (since fetch doesn't support progress for JSON)
-        // In a real scenario, you'd track progress if uploading actual files
-        const progressInterval = setInterval(() => {
-          setUploadProgress((prev) => {
-            if (prev >= 90) {
-              clearInterval(progressInterval);
-              return 90;
-            }
-            return prev + 10;
-          });
-        }, 100);
+        setUploadProgress(85);
 
         // Save to file on server via API route
         const response = await fetch('/api/save-project-data', {
@@ -153,8 +245,7 @@ export default function FileUpload() {
           body: JSON.stringify(projectData),
         });
 
-        clearInterval(progressInterval);
-        setUploadProgress(100);
+        setUploadProgress(95);
 
         if (!response.ok) {
           throw new Error('Failed to save project data');
@@ -162,6 +253,8 @@ export default function FileUpload() {
 
         const result = await response.json();
         console.log('Project data saved:', result);
+
+        setUploadProgress(100);
 
         // Small delay to show 100% before navigation
         setTimeout(() => {
@@ -225,12 +318,26 @@ export default function FileUpload() {
       )}
 
       {/* Main content area - split 1/3 : 2/3 */}
-      <div className="flex flex-1 px-8 pb-6 min-h-0 gap-6">
+      <div className="flex flex-1 px-8 pt-6 pb-6 min-h-0 gap-6">
         {/* Left 1/3 - Input fields */}
         <div className="w-1/3 flex flex-col min-h-0">
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6 space-y-6 overflow-y-auto">
+            {/* Clear text fields button - fixed height container to prevent card expansion */}
+            <div className="h-10 flex justify-end items-start -mt-2 -mb-4">
+              {(title.trim() !== '' || projectDescription.trim() !== '' || technicalDomain !== '') && (
+                <button
+                  onClick={clearAllTextFields}
+                  className="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors flex items-center gap-2"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                  Clear All Fields
+                </button>
+              )}
+            </div>
             <div>
-              <label htmlFor="title" className="block text-sm font-semibold text-gray-900 dark:text-gray-100 mb-2.5">
+              <label htmlFor="title" className="block text-base font-semibold text-gray-900 dark:text-gray-100 mb-2.5">
                 Title
               </label>
               <input
@@ -238,27 +345,41 @@ export default function FileUpload() {
                 type="text"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
+                onBlur={() => setTouchedFields({ ...touchedFields, title: true })}
                 placeholder="Enter project title"
-                className="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 transition-all shadow-sm hover:border-gray-400 dark:hover:border-gray-500"
+                className={`w-full px-4 py-3 text-base border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 transition-all shadow-sm hover:border-gray-400 dark:hover:border-gray-500 ${title.trim() === '' && touchedFields.title
+                  ? 'border-red-400 dark:border-red-600'
+                  : 'border-gray-300 dark:border-gray-600'
+                  }`}
               />
+              {title.trim() === '' && touchedFields.title && (
+                <p className="mt-1.5 text-sm text-red-600 dark:text-red-400">Title is required</p>
+              )}
             </div>
 
             <div>
-              <label htmlFor="description" className="block text-sm font-semibold text-gray-900 dark:text-gray-100 mb-2.5">
+              <label htmlFor="description" className="block text-base font-semibold text-gray-900 dark:text-gray-100 mb-2.5">
                 Project Description
               </label>
               <textarea
                 id="description"
                 value={projectDescription}
                 onChange={(e) => setProjectDescription(e.target.value)}
+                onBlur={() => setTouchedFields({ ...touchedFields, description: true })}
                 placeholder="Enter project description"
                 rows={4}
-                className="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 resize-none transition-all shadow-sm hover:border-gray-400 dark:hover:border-gray-500"
+                className={`w-full px-4 py-3 text-base border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 resize-none transition-all shadow-sm hover:border-gray-400 dark:hover:border-gray-500 ${projectDescription.trim() === '' && touchedFields.description
+                  ? 'border-red-400 dark:border-red-600'
+                  : 'border-gray-300 dark:border-gray-600'
+                  }`}
               />
+              {projectDescription.trim() === '' && touchedFields.description && (
+                <p className="mt-1.5 text-sm text-red-600 dark:text-red-400">Project description is required</p>
+              )}
             </div>
 
             <div>
-              <label htmlFor="domain" className="block text-sm font-semibold text-gray-900 dark:text-gray-100 mb-2.5">
+              <label htmlFor="domain" className="block text-base font-semibold text-gray-900 dark:text-gray-100 mb-2.5">
                 Technical Domain
               </label>
               <div className="relative">
@@ -266,7 +387,11 @@ export default function FileUpload() {
                   id="domain"
                   value={technicalDomain}
                   onChange={(e) => setTechnicalDomain(e.target.value)}
-                  className="w-full px-4 py-3 pr-10 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 appearance-none cursor-pointer transition-all shadow-sm hover:border-gray-400 dark:hover:border-gray-500"
+                  onBlur={() => setTouchedFields({ ...touchedFields, domain: true })}
+                  className={`w-full px-4 py-3 pr-10 text-base border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 appearance-none cursor-pointer transition-all shadow-sm hover:border-gray-400 dark:hover:border-gray-500 ${technicalDomain === '' && touchedFields.domain
+                    ? 'border-red-400 dark:border-red-600'
+                    : 'border-gray-300 dark:border-gray-600'
+                    }`}
                 >
                   <option value="">Select a domain</option>
                   <option value="software-engineering">Software Engineering</option>
@@ -285,6 +410,9 @@ export default function FileUpload() {
                   </svg>
                 </div>
               </div>
+              {technicalDomain === '' && touchedFields.domain && (
+                <p className="mt-1.5 text-sm text-red-600 dark:text-red-400">Technical domain is required</p>
+              )}
             </div>
           </div>
         </div>
@@ -294,9 +422,20 @@ export default function FileUpload() {
           {/* Summary of uploaded files at top */}
           {uploadedFiles.length > 0 && (
             <div className="mb-4 p-4 bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 flex-shrink-0">
-              <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-3">
-                Uploaded Files ({uploadedFiles.length})
-              </h3>
+              <div className="flex justify-between items-center mb-3">
+                <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                  Uploaded Files ({uploadedFiles.length})
+                </h3>
+                <button
+                  onClick={clearAllFiles}
+                  className="px-3 py-1.5 text-xs font-medium text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-md transition-colors flex items-center gap-1.5"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                  Clear All Files
+                </button>
+              </div>
               <div className="space-y-2 max-h-64 overflow-y-auto">
                 {uploadedFiles.map((fileItem, index) => (
                   <div
@@ -354,7 +493,15 @@ export default function FileUpload() {
               }`}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
+            onDrop={(e) => {
+              handleDrop(e);
+              setTouchedFields({ ...touchedFields, files: true });
+            }}
+            onClick={() => {
+              if (uploadedFiles.length === 0) {
+                setTouchedFields({ ...touchedFields, files: true });
+              }
+            }}
           >
             <label className="cursor-pointer w-full h-full flex flex-col items-center justify-center p-12">
               <input
@@ -392,8 +539,8 @@ export default function FileUpload() {
                 <p className="text-sm text-gray-500 dark:text-gray-400 mb-1">
                   Supporting documents (PDF, DOC, DOCX, TXT)
                 </p>
-                {uploadedFiles.length === 0 && (
-                  <p className="text-sm text-red-500 dark:text-red-400 mt-3 font-medium">
+                {uploadedFiles.length === 0 && touchedFields.files && (
+                  <p className="text-sm text-red-600 dark:text-red-400 mt-3 font-medium">
                     At least one document is required
                   </p>
                 )}
